@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Long Page Screenshot",
+  "description": "Capture a full-page screenshot by automatically scrolling and stitching visible captures.",
+  "version": "0.1.0",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "downloads",
+    "offscreen",
+    "scripting"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Long Page Screenshot"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
