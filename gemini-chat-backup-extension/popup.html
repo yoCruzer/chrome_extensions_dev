@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gemini Chat Backup</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        width: 300px;
+        margin: 0;
+        padding: 14px;
+        color: #202124;
+        background: #fff;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 16px;
+        font-weight: 650;
+      }
+
+      button {
+        width: 100%;
+        margin: 0 0 10px;
+        padding: 10px 12px;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+        color: #202124;
+        background: #f8fafd;
+        font-size: 14px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #eef3fb;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.62;
+      }
+
+      #status {
+        min-height: 18px;
+        margin-top: 2px;
+        color: #5f6368;
+        font-size: 12px;
+        line-height: 1.5;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Gemini 会话备份</h1>
+    <button id="export-current" type="button">提取并下载当前对话 (MD)</button>
+    <button id="backup-test" type="button">🧪 批量备份测试 (独立3个会话 ➔ ZIP)</button>
+    <button id="backup-all" type="button">🤖 自动化：一键备份全量历史 (ZIP)</button>
+    <div id="status" role="status" aria-live="polite"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>
