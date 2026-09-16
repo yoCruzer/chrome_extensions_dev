@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V2 deterministic complex screenshot fixture</title>
+<style>
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-snap-type: y proximity; }
+  body { margin: 0; color: #192a3d; background: #edf2f6; font: 16px/1.6 system-ui, sans-serif; }
+  #fixed-header { position: fixed; inset: 0 0 auto; height: 64px; z-index: 9000; background: #d52a48; color: white; padding: 16px 24px; }
+  #fixed-background { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+  #tiny-fixed { position: fixed; right: 2px; bottom: 2px; width: 4px; height: 4px; background: #192a3d; }
+  .intro { padding: 88px 24px 24px; background: #dce7ef; }
+  h1 { margin: 0; font-size: 26px; }
+  button { padding: 8px 12px; cursor: pointer; }
+  .layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; padding: 24px; }
+  #sticky-sidebar { position: sticky; top: 76px; z-index: 2; padding: 16px; background: #ffd87a; border: 2px solid #bc8300; }
+  article { min-width: 0; border: 4px solid #147b66; background: white; }
+  .article-title, section { padding: 24px; }
+  section { border-top: 2px solid #b7ccda; scroll-snap-align: start; }
+  h2 { margin: 0 0 12px; }
+  pre { padding: 16px; background: #192a3d; color: #e2f3fb; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; border: 1px solid #9cb2c2; padding: 8px; }
+  img { display: block; width: 100%; height: 160px; margin-top: 20px; background: #d9e2e9; }
+  #article-end { height: 40px; background: rgb(20, 123, 102); color: white; padding-left: 20px; }
+  footer { height: 140px; padding: 30px 24px; background: rgb(31, 61, 85); color: white; }
+</style>
+</head>
+<body>
+<header id="fixed-header" style="opacity: 0.97 !important">FIXED HEADER — should disappear during capture and return afterwards</header>
+<div id="fixed-background" aria-hidden="true"></div><div id="tiny-fixed" aria-hidden="true"></div>
+<div class="intro">
+  <h1>Complex long-page screenshot fixture</h1>
+  <p>No external assets. Select the green article border to exclude the yellow sidebar and footer.</p>
+  <p>After 2 seconds a 240px panel is inserted above the article end. Images render 180ms after entering the viewport.</p>
+  <button id="grow">Insert another height-change panel</button>
+  <span id="status" aria-live="polite">Waiting for initial height change…</span>
+</div>
+<div class="layout">
+  <aside><nav id="sticky-sidebar" style="top: 76px !important"><strong>STICKY SIDEBAR</strong><p>Must appear once in full capture, stay outside article-only capture, and stick again afterwards.</p><a href="#section-18">Jump to section 18</a></nav></aside>
+  <article id="article"><div class="article-title"><h2>ARTICLE START</h2><p>Sections 01–18 have deterministic text, tables, code and lazy images.</p></div><div id="sections"></div><div id="article-end">ARTICLE END — green boundary</div></article>
+</div>
+<footer id="footer">DOCUMENT END — complete bottom content marker</footer>
+<script>
+  const sections = document.getElementById('sections');
+  for (let i = 1; i <= 18; i++) {
+    const section = document.createElement('section');
+    section.id = `section-${i}`;
+    section.innerHTML = `<h2>Section ${String(i).padStart(2, '0')} — stitching checkpoint</h2>
+      <p>This paragraph is fixed local content. Scrolling should preserve every line and section boundary across screenshot tiles.</p>
+      <p>The sidebar occupies its own column. Delayed images use reserved space, while the timed panel deliberately changes the document height.</p>
+      <pre><code>const checkpoint = ${i};\nconst expected = "complete section and no repeated header";\nverify(checkpoint, expected);</code></pre>
+      <table><thead><tr><th>Check</th><th>Expected</th></tr></thead><tbody><tr><td>Section ${i}</td><td>Complete text and border</td></tr><tr><td>Image ${i}</td><td>Blue local SVG with section label</td></tr></tbody></table>
+      <img data-section="${i}" alt="Lazy local image ${i}">`;
+    sections.append(section);
+  }
+  const observer = new IntersectionObserver(entries => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      observer.unobserve(entry.target);
+      setTimeout(() => {
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="160"><rect width="640" height="160" fill="#2273b5"/><text x="24" y="88" font-size="28" fill="white">LAZY IMAGE ${entry.target.dataset.section} — loaded</text></svg>`;
+        entry.target.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        entry.target.dataset.loaded = 'true';
+      }, 180);
+    }
+  });
+  document.querySelectorAll('img').forEach(img => observer.observe(img));
+  function grow() {
+    const panel = document.createElement('div');
+    panel.className = 'dynamic-panel';
+    panel.style.cssText = 'height:240px;margin:20px;padding:20px;background:#e4f3d8';
+    panel.textContent = 'DYNAMIC CONTENT — 240px inserted panel. A stale region must be rejected.';
+    document.getElementById('article-end').before(panel);
+    document.getElementById('status').textContent = 'Height change complete';
+    document.body.dataset.grown = 'true';
+  }
+  document.getElementById('grow').onclick = grow;
+  setTimeout(grow, 2000);
+</script>
+</body>
+</html>

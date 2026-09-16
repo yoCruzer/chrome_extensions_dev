@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testComplexPage } from "./complex.mjs";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 const { PNG } = require("pngjs");
@@ -16,7 +17,8 @@ await mkdir(downloads);
 const fixture = `<!doctype html><style>html{scroll-behavior:smooth;scroll-snap-type:y mandatory}body{margin:0}canvas{display:block}#fixed{position:fixed;top:0;background:red;width:100%;height:60px}</style><canvas width="1500" height="10337"></canvas><div id="fixed">Fixed header</div><script>
 const c=document.querySelector('canvas'),ctx=c.getContext('2d');for(let y=0;y<c.height;y++){ctx.fillStyle='rgb('+(y%251)+','+Math.floor(y/251)+',97)';ctx.fillRect(0,y,c.width,1)};
 </script>`;
-const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(fixture); });
+const complexFixture = await readFile(resolve(extension, "../tests/fixtures/test-complex-page.html"), "utf8");
+const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(process.env.COMPLEX_ONLY ? complexFixture : fixture); });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
   ...(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: "chromium" }),
@@ -66,15 +68,18 @@ try {
     assert.equal(result.ok, true, JSON.stringify(result));
     return result;
   };
-  const selectRegion = async (selection, edges) => {
+  const selectRegion = async (selection, edges, expected = true) => {
     const selected = await worker.evaluate(async ({ id, edges }) => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: async (id, edges) => chrome.runtime.sendMessage({ target: "background", type: "REGION", id, edges }), args: [id, edges] });
       return result.result;
     }, { id: selection.id, edges });
-    assert.equal(selected.ok, true, JSON.stringify(selected));
+    assert.equal(selected.ok, expected, JSON.stringify(selected));
+    return selected;
   };
-  if (process.env.NATIVE_DPR) {
+  if (process.env.COMPLEX_ONLY) {
+    await testComplexPage({ page, worker, message, waitFor, capture, selectRegion, root, PNG });
+  } else if (process.env.NATIVE_DPR) {
     const retina = await capture("region");
     await selectRegion(retina, { left: 200, top: 100, right: 700, bottom: 1700 });
     const result = await waitFor(s => !s.busy);

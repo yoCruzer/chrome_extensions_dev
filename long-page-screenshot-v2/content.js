@@ -56,7 +56,7 @@
 
   function begin(id) {
     if (session) throw new Error("页面已有截图任务。");
-    session = { id, x: scrollX, y: scrollY, touched: Date.now(), changed: new Map(), capturing: false };
+    session = { id, x: scrollX, y: scrollY, touched: Date.now(), changed: new Map(), candidates: new Set(), capturing: false };
     session.watchdog = setInterval(() => {
       if (session && Date.now() - session.touched > 30_000) restore();
     }, 2000);
@@ -65,15 +65,29 @@
 
   function adjustElement(element, s) {
     if (!(element instanceof HTMLElement) || s.changed.has(element) || element === s.host) return;
-    const position = getComputedStyle(element).position;
+    const style = getComputedStyle(element);
+    const position = style.position;
+    if (position !== "fixed" && position !== "sticky") return;
+    s.candidates.add(element);
+    const rect = element.getBoundingClientRect();
+    const width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
+    if (style.visibility !== "visible" || Number(style.opacity) === 0 ||
+        rect.width < 16 || rect.height < 16 || rect.bottom <= 0 || rect.right <= 0 ||
+        rect.top >= height || rect.left >= width || Number(style.zIndex) < 0) return;
+    // Leave large application shells/backgrounds alone. Only bounded overlays
+    // or sticky blocks with an actual inset are likely to repeat over content.
+    if (rect.width * rect.height > width * height * 0.65) return;
+    const atEdge = rect.top <= 2 || rect.left <= 2 || rect.bottom >= height - 2 || rect.right >= width - 2;
+    if (position === "fixed" && !atEdge && !(Number(style.zIndex) > 0)) return;
+    if (position === "sticky" && [style.top, style.right, style.bottom, style.left].every(value => value === "auto")) return;
     const changes = position === "fixed" ? { visibility: "hidden", opacity: "0" }
-      : position === "sticky" ? { position: "relative", top: "auto", right: "auto", bottom: "auto", left: "auto" } : null;
-    if (!changes) return;
+      : { position: "relative", top: "auto", right: "auto", bottom: "auto", left: "auto" };
     s.changed.set(element, Object.keys(changes).map(key => [key, element.style.getPropertyValue(key), element.style.getPropertyPriority(key)]));
     for (const [key, value] of Object.entries(changes)) element.style.setProperty(key, value, "important");
   }
 
   function prepare(s) {
+    if (s.capturing) throw new Error("页面已进入截图阶段。");
     s.removeSelectionListener?.();
     s.host?.remove();
     s.capturing = true;
@@ -95,12 +109,18 @@
   }
 
   async function settle(id, x, y) {
+    requireSession(id);
     window.scrollTo({ left: x, top: y, behavior: "instant" });
     let previous = "", stable = 0;
     const started = Date.now();
     while (Date.now() - started < 5000) {
       await delay(120);
-      requireSession(id);
+      const s = requireSession(id);
+      // Revisit off-viewport candidates once they become visible while scrolling.
+      for (const element of s.candidates) {
+        if (!element.isConnected) s.candidates.delete(element);
+        else adjustElement(element, s);
+      }
       const view = measure();
       const signature = JSON.stringify(view);
       const imagesLoading = [...document.images].some(img => {

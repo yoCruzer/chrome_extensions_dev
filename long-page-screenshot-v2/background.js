@@ -10,22 +10,23 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // explicitly mark the old job interrupted instead of accepting stale messages.
 const ready = (async () => {
   const saved = (await chrome.storage.session.get("status")).status;
+  const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+  if (contexts.length) await chrome.offscreen.closeDocument();
   if (saved?.busy) {
     await chrome.tabs.sendMessage(saved.tabId, { target: "content", type: "FINISH", id: saved.id }).catch(() => {});
     if (saved.downloadId) await chrome.downloads.cancel(saved.downloadId).catch(() => {});
-    const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-    if (contexts.length) await chrome.offscreen.closeDocument();
     lastStatus = { ...saved, busy: false, state: "failed", message: "上次任务已中断，页面已恢复。已下载的分片可能不完整，请重新截图。" };
     await chrome.storage.session.set({ status: lastStatus });
   } else if (saved) lastStatus = saved;
 })();
 
 function check(s) {
-  if (active !== s || s.cancelled) throw new Error(s.reason || "截图已取消。");
+  if (active !== s || s.cancelled || s.finishing) throw new Error(s.reason || "截图已取消。");
   if (Date.now() - s.started > 15 * 60_000) throw new Error("任务超过 15 分钟，请缩小选区后重试。");
 }
 
 async function status(s, state, message) {
+  check(s);
   s.state = state;
   lastStatus = { id: s.id, tabId: s.tab.id, state, message, busy: true,
     frames: s.frames, parts: s.parts, downloadId: s.downloadId };
@@ -49,12 +50,15 @@ async function finish(s, error) {
   clearInterval(s.heartbeat);
   if (s.downloadId) await chrome.downloads.cancel(s.downloadId).catch(() => {});
   await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "FINISH", id: s.id }, { frameId: 0 }).catch(() => {});
-  if (s.offscreen) await chrome.offscreen.closeDocument().catch(() => {});
+  if (s.offscreen) {
+    await chrome.runtime.sendMessage({ target: "offscreen", type: "CLOSE", id: s.id }).catch(() => {});
+    await chrome.offscreen.closeDocument().catch(() => {});
+  }
   lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts,
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
     message: error ? `${error.message}${s.parts ? ` 已保存 ${s.parts} 个分片，整页尚未完成。` : ""}` : `截图完成，已保存 ${s.parts} 个 PNG 分片。` };
-  await chrome.storage.session.set({ status: lastStatus });
-  if (active === s) active = null;
+  try { await chrome.storage.session.set({ status: lastStatus }); }
+  finally { if (active === s) active = null; }
 }
 
 async function start(mode) {
@@ -67,7 +71,7 @@ async function start(mode) {
   try {
     await status(s, "preparing", "正在准备页面…");
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-    await request(s, "content", "BEGIN", { mode });
+    s.selectionPage = await request(s, "content", "BEGIN", { mode });
     s.heartbeat = setInterval(() => {
       request(s, "content", "TOUCH").catch(error => {
         s.cancelled = true; s.reason = error.message;
@@ -89,6 +93,16 @@ async function ensureVisible(s) {
 function validateView(s, view) {
   if (!sameViewport(s.viewport, view) || view.visualScale !== 1) throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
   if (view.width !== s.viewport.width) throw new Error("页面宽度发生变化，请等待页面稳定后重试。");
+  if (s.mode === "region") validateRegion(s, view);
+}
+
+function validateRegion(s, page) {
+  if (page.width !== s.selectionPage.width || page.height !== s.selectionPage.height ||
+      !sameViewport(s.selectionPage, page) || page.visualScale !== s.selectionPage.visualScale) {
+    throw new Error("选择区域后页面尺寸或视口发生变化，请等待加载完成后重新选择区域。");
+  }
+  regionFromEdges({ left: s.region.x, top: s.region.y,
+    right: s.region.x + s.region.width, bottom: s.region.y + s.region.height }, page);
 }
 
 async function scroll(s, x, y) {
@@ -154,11 +168,15 @@ async function run(s) {
   try {
     await status(s, "preparing", "正在准备截图…");
     s.viewport = await request(s, "content", "PREPARE");
+    if (s.mode === "region") validateRegion(s, s.viewport);
     if (s.viewport.visualScale !== 1 || s.viewport.clientHeight < 64 || s.viewport.clientWidth < 64) throw new Error("请恢复触控缩放并增大浏览器窗口。");
     let view = await warm(s);
     let dataUrl = await capture(s, view);
-    await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch screenshot tiles and encode bounded PNG parts." });
     s.offscreen = true;
+    // A previous close may have failed even after its session was released.
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+    if (contexts.length) await chrome.offscreen.closeDocument();
+    await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch screenshot tiles and encode bounded PNG parts." });
     const scale = await request(s, "offscreen", "OPEN", { region: s.region, view, dataUrl });
     const total = pixelEdge(s.region.y + s.region.height, s.region.y, scale.scaleY);
     if (total < 1) throw new Error("选区高度小于一个输出像素。");
@@ -188,7 +206,7 @@ async function run(s) {
       }
       const { url } = await request(s, "offscreen", "EXPORT");
       await savePart(s, url);
-      await request(s, "offscreen", "RELEASE");
+      await request(s, "offscreen", "RELEASE", { final: start + height === total });
     }
     await finish(s);
   } catch (error) { await finish(s, error); }
@@ -209,10 +227,15 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
       return {};
     }
     if (m.type === "REGION" && s.state === "selecting" && sender.tab && !fromPopup) {
-      const page = await request(s, "content", "MEASURE");
-      s.region = regionFromEdges(m.edges, page);
-      void run(s);
-      return {};
+      // Claim the selection before awaiting so duplicate submissions cannot run twice.
+      try {
+        await status(s, "preparing", "正在复核选区…");
+        const page = await request(s, "content", "MEASURE");
+        s.region = regionFromEdges(m.edges, page);
+        validateRegion(s, page);
+        void run(s);
+        return {};
+      } catch (error) { await finish(s, error); throw error; }
     }
     throw new Error("当前任务不接受此操作。");
   })().then(value => respond({ ok: true, ...value }), error => respond({ ok: false, error: error.message }));
