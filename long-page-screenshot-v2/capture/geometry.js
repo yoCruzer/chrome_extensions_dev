@@ -41,8 +41,8 @@ export function drawGeometry(region, view, rect, scale, partStart) {
   const y0 = pixelEdge(rect.y, region.y, scale.scaleY);
   const y1 = pixelEdge(rect.bottom, region.y, scale.scaleY);
   return {
-    sx: (rect.x - view.x) * (scale.sourceX ?? scale.scaleX),
-    sy: (rect.y - view.y) * (scale.sourceY ?? scale.scaleY),
+    sx: (rect.x - view.x + (view.viewportRect?.left || 0)) * (scale.sourceX ?? scale.scaleX),
+    sy: (rect.y - view.y + (view.viewportRect?.top || 0)) * (scale.sourceY ?? scale.scaleY),
     sw: (rect.right - rect.x) * (scale.sourceX ?? scale.scaleX),
     sh: (rect.bottom - rect.y) * (scale.sourceY ?? scale.scaleY),
     dx: x0, dy: y0 - partStart, dw: x1 - x0, dh: y1 - y0

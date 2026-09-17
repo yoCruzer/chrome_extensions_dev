@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>Adaptive article fixture</title>
+<style>html{overflow-anchor:none}body{margin:0}canvas,img{display:block}canvas{width:900px}#article{width:900px}</style>
+<article id="article"></article>
+<script>
+const article=document.getElementById('article');let sequence=0;
+window.appendBlock=(label='ARTICLE',prepend=false)=>{
+ const c=document.createElement('canvas');c.width=900;c.height=400;
+ const ctx=c.getContext('2d'),id=sequence++;
+ for(let y=0;y<400;y++){ctx.fillStyle=`rgb(${(id*400+y)%251},${Math.floor((id*400+y)/251)},97)`;ctx.fillRect(0,y,900,1)}
+ ctx.fillStyle='white';ctx.font='20px monospace';ctx.fillText(label,60,80);
+ if(prepend)article.prepend(c);else article.append(c);
+};
+for(let i=0;i<6;i++)appendBlock('ARTICLE '+i);
+window.grow=()=>{
+ appendBlock('RECOMMENDATION');
+ const img=new Image();img.width=900;img.height=20;img.loading='lazy';img.src='/lazy.svg?'+sequence;article.append(img);
+ appendBlock('FINAL BOTTOM MARKER');
+};
+window.armBottomGrowth=count=>{
+ let remaining=count,pending=false;
+ const onScroll=()=>{
+  if(!pending && remaining && scrollY+innerHeight>=document.documentElement.scrollHeight-1){
+   pending=true;setTimeout(()=>{grow();remaining--;pending=false},300);
+  }
+ };
+ addEventListener('scroll',onScroll);onScroll();
+};
+</script>

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { regionFromEdges, outputGeometry, drawGeometry, pixelEdge, MAX_PIXELS, sameViewport } from "../capture/geometry.js";
-import { visibleTile, checkHeight } from "../capture/planner.js";
+import { visibleTile } from "../capture/planner.js";
 
 test("selection validates all four document edges", () => {
   const page = { width: 1200, height: 30000 };
@@ -61,9 +61,7 @@ test("actual clamped last viewport is cropped, not appended twice", () => {
   assert.throws(() => visibleTile(region, { ...view, y: 0 }, 0, 800));
 });
 
-test("Full Page limits fail for infinite growth, oversized width and strict viewport changes", () => {
-  checkHeight(5000, 6500, 700);
-  assert.throws(() => checkHeight(5000, 20000, 700));
+test("Full Page rejects oversized width and strict viewport changes", () => {
   assert.throws(() => outputGeometry({ x: 0, width: 20000 }, { innerWidth: 1000, innerHeight: 700 }, { width: 1000, height: 700 }));
   assert.equal(sameViewport({ dpr: 1 }, { dpr: 2 }), false);
 });
@@ -92,4 +90,12 @@ test("Auto rounds repeatedly until the 16 MP budget is satisfied", () => {
   const out = outputGeometry({ x: 0, y: 0, width: 1030, height: 15878 },
     { innerWidth: 900, innerHeight: 700 }, { width: 900, height: 700 });
   assert.ok(out.width * out.height <= MAX_PIXELS);
+});
+
+test('nested target crop adds browser viewport origin using bitmap-derived scale', () => {
+  const region = {x:0,y:2000,width:499,height:2400};
+  const view = {x:0,y:2000,innerWidth:900,innerHeight:700,viewportRect:{left:80,top:40}};
+  const scale = outputGeometry(region,view,{width:1800,height:1400},'css');
+  const d = drawGeometry(region,view,{x:0,y:2000,right:499,bottom:2620},scale,0);
+  assert.deepEqual(d,{sx:160,sy:80,sw:998,sh:1240,dx:0,dy:0,dw:499,dh:620});
 });

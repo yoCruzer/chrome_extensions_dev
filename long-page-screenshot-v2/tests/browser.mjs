@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testAdaptive } from "./adaptive.mjs";
+import { testNested } from "./nested.mjs";
 import { testReliability } from "./reliability.mjs";
 import { testDynamicRegion } from "./dynamic.mjs";
 import { testComplexPage } from "./complex.mjs";
@@ -22,7 +24,14 @@ const c=document.querySelector('canvas'),ctx=c.getContext('2d');for(let y=0;y<c.
 const complexFixture = await readFile(resolve(extension, "../tests/fixtures/test-complex-page.html"), "utf8");
 const dynamicFixture = await readFile(resolve(extension, "tests/fixtures/test-dynamic-region-page.html"), "utf8");
 const reliabilityFixture = process.env.RELIABILITY_ONLY ? await readFile(resolve(extension, `tests/fixtures/test-${process.env.RELIABILITY_ONLY}-like-page.html`), "utf8") : null;
-const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
+const nestedFixture = process.env.NESTED_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-nested-page.html"), "utf8") : null;
+const adaptiveFixture = process.env.ADAPTIVE_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-adaptive-page.html"), "utf8") : null;
+const server = createServer((req, res) => {
+  if (req.url.startsWith('/lazy.svg')) {
+    res.setHeader('Content-Type','image/svg+xml');
+    setTimeout(()=>res.end('<svg xmlns="http://www.w3.org/2000/svg" width="900" height="20"><rect width="900" height="20" fill="#e000e0"/></svg>'),600);
+    return;
+  } res.setHeader("Content-Type", "text/html"); res.end(adaptiveFixture || nestedFixture || reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
   ...(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: "chromium" }),
@@ -81,7 +90,11 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.RELIABILITY_ONLY) {
+  if (process.env.ADAPTIVE_ONLY) {
+    await testAdaptive({ page, worker, message, waitFor, capture, PNG });
+  } else if (process.env.NESTED_ONLY) {
+    await testNested({ page, worker, message, waitFor, capture, PNG, browserCDP });
+  } else if (process.env.RELIABILITY_ONLY) {
     await testReliability({ page, worker, message, waitFor, capture, PNG, kind:process.env.RELIABILITY_ONLY });
   } else if (process.env.DYNAMIC_ONLY) {
     await testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG });

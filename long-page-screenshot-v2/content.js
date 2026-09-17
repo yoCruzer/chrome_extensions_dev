@@ -45,6 +45,46 @@
       dpr: devicePixelRatio, visualScale: visualViewport?.scale || 1 };
   }
 
+  // A target owns content coordinates; bitmap coordinates remain browser-local.
+  function targetView(s) {
+    const view = measure(), element = s.target?.element;
+    if (!element) return { ...view, targetKind: "window", viewportRect: { left: 0, top: 0 } };
+    const r = element.getBoundingClientRect();
+    if (!element.isConnected || !r.width || !r.height || getComputedStyle(element).visibility !== "visible") {
+      throw Object.assign(new Error("所选滚动容器已失效，请重新选择区域。"), { reasonCode: "TARGET_UNRESOLVABLE" });
+    }
+    const left = Math.max(0, r.left + element.clientLeft), top = Math.max(0, r.top + element.clientTop);
+    const right = Math.min(innerWidth, r.left + element.clientLeft + element.clientWidth);
+    const bottom = Math.min(innerHeight, r.top + element.clientTop + element.clientHeight);
+    if (right <= left || bottom <= top) throw new Error("所选滚动容器不可见。");
+    return { ...view, targetKind: "element", viewportRect: { left, top },
+      x: element.scrollLeft + left - r.left - element.clientLeft,
+      y: element.scrollTop + top - r.top - element.clientTop,
+      clientWidth: right - left, clientHeight: bottom - top,
+      width: element.scrollWidth, height: element.scrollHeight };
+  }
+
+  function targetPoint(s, x, y) {
+    const view = targetView(s);
+    return { x: x - view.viewportRect.left + view.x, y: y - view.viewportRect.top + view.y };
+  }
+
+  function detectTarget(s) {
+    const first = s.anchors?.first?.element, second = s.anchors?.second?.element;
+    let selected;
+    for (let element = first; element && element !== document.body && element !== document.documentElement; element = element.parentElement) {
+      const style = getComputedStyle(element), r = element.getBoundingClientRect();
+      if (element.isConnected && r.width > 0 && r.height > 0 && style.visibility === "visible" &&
+          (!second || element.contains(second)) &&
+          ((/(auto|scroll|overlay)/.test(style.overflowY) && element.scrollHeight > element.clientHeight) ||
+           (/(auto|scroll|overlay)/.test(style.overflowX) && element.scrollWidth > element.clientWidth))) {
+        selected = element; break;
+      }
+    }
+    if (selected && !s.targetScrolls.has(selected)) s.targetScrolls.set(selected, { x: selected.scrollLeft, y: selected.scrollTop });
+    s.target = selected ? { element: selected } : null;
+  }
+
   // Element references live only for this document/session, never in the worker.
   function anchorAt(s, x, y) {
     s.host.style.setProperty("visibility", "hidden", "important");
@@ -57,7 +97,7 @@
     }
     if (!element || element === s.host || element === progress?.host) throw new Error("无法定位所选内容，请重新点选。");
     const rect = element.getBoundingClientRect();
-    return { element, dx: x - rect.left, dy: y - rect.top,
+    return { element, scrollLeft: element.scrollLeft || 0, scrollTop: element.scrollTop || 0, dx: x - rect.left, dy: y - rect.top,
       width: rect.width, height: rect.height,
       rect: { x: rect.left + scrollX, y: rect.top + scrollY, width: rect.width, height: rect.height },
       rx: (x - rect.left) / rect.width, ry: (y - rect.top) / rect.height,
@@ -98,7 +138,9 @@
         const dx = offset(r.width, anchor.width, anchor.dx, anchor.rx, anchor.insets.left, anchor.insets.right);
         const dy = offset(r.height, anchor.height, anchor.dy, anchor.ry, anchor.insets.top, anchor.insets.bottom);
         diagnostic.mode = unchanged ? "exact" : edge ? "edge-affinity" : "ratio";
-        diagnostic.point = { x: r.left + scrollX + dx, y: r.top + scrollY + dy };
+        diagnostic.point = anchor.element === s.target?.element
+          ? { x: anchor.dx - anchor.element.clientLeft + anchor.scrollLeft, y: anchor.dy - anchor.element.clientTop + anchor.scrollTop }
+          : targetPoint(s, r.left + dx, r.top + dy);
         return diagnostic.point;
       };
       const a = point(s.anchors.first, "first"), b = point(s.anchors.second, "second");
@@ -109,8 +151,34 @@
     return region;
   }
 
+  function fullProof(s, watch = false) {
+    if (!s.fullProof) return;
+    const proof = s.fullProof;
+    const fail = () => { throw Object.assign(new Error("已截图内容发生变化，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" }); };
+    if (proof.invalid) fail();
+    for (const [element, before] of proof.nodes) {
+      const r = element.getBoundingClientRect();
+      const current = [r.left + scrollX, r.top + scrollY, r.width, r.height];
+      if (!element.isConnected || current.some((n, i) => Math.abs(n - before[i]) > 0.5)) fail();
+    }
+    if (!watch) return;
+    // Geometric witnesses of painted leaf boxes, not a DOM fingerprint. Appending
+    // below them leaves these coordinates valid; insertion/reflow above does not.
+    for (const element of document.querySelectorAll("body *")) {
+      if (element === progress?.host || element === s.host || element.children.length ||
+          ["SCRIPT", "STYLE", "LINK"].includes(element.tagName)) continue;
+      const r = element.getBoundingClientRect(), style = getComputedStyle(element);
+      if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth ||
+          !r.width || !r.height || style.visibility !== "visible" || style.position === "fixed") continue;
+      proof.nodes.set(element, [r.left + scrollX, r.top + scrollY, r.width, r.height]);
+    }
+    if (proof.nodes.size > 20000) throw new Error("页面内容过多，请改用选择区域。");
+    proof.end = Math.max(proof.end, Math.min(measure().height, scrollY + innerHeight));
+  }
+
   function regionView(s) {
-    const view = measure(), region = resolveRegion(s);
+    fullProof(s);
+    const view = targetView(s), region = resolveRegion(s);
     if (!region) return view;
     return { ...view, region, anchors: s.anchorDiagnostics };
   }
@@ -136,6 +204,9 @@
       }
     }
     // Restore while smooth scrolling and scroll snapping are still disabled.
+    for (const [element, point] of s.targetScrolls) {
+      if (element.isConnected) element.scrollTo({ left: point.x, top: point.y, behavior: "instant" });
+    }
     window.scrollTo({ left: s.x, top: s.y, behavior: "instant" });
     s.style?.remove();
     document.removeEventListener("keydown", onKey, true);
@@ -158,7 +229,7 @@
 
   function begin(id) {
     if (session) throw new Error("页面已有截图任务。");
-    session = { id, x: scrollX, y: scrollY, touched: Date.now(), changed: new Map(), candidates: new Set(), capturing: false };
+    session = { id, x: scrollX, y: scrollY, touched: Date.now(), changed: new Map(), targetScrolls: new Map(), candidates: new Set(), capturing: false };
     session.watchdog = setInterval(() => {
       if (session && Date.now() - session.touched > 30_000) restore();
     }, 2000);
@@ -207,19 +278,38 @@
     document.documentElement.append(s.style);
     document.querySelectorAll("*").forEach(element => adjustElement(element, s));
     s.observer = new MutationObserver(records => {
+      if (s.fullProof) for (const record of records) {
+        const proof = s.fullProof;
+        if (record.target === progress?.host || record.target === s.host) continue;
+        const changed = record.target.nodeType === 3 ? record.target.parentElement : record.target;
+        if (changed instanceof HTMLElement && (record.type === "characterData" || record.type === "attributes" || proof.nodes.has(changed))) {
+          const r = changed.getBoundingClientRect();
+          if (r.width && r.height && r.top + scrollY < proof.end - 0.5 &&
+              getComputedStyle(changed).visibility === "visible" && getComputedStyle(changed).position !== "fixed") proof.invalid = true;
+        }
+        for (const node of record.addedNodes) {
+          if (!(node instanceof HTMLElement) || node === progress?.host || node === s.host || node === s.style) continue;
+          const r = node.getBoundingClientRect();
+          if (r.width && r.height && r.top + scrollY < proof.end - 0.5 && getComputedStyle(node).position !== "fixed") proof.invalid = true;
+        }
+      }
       for (const record of records) for (const node of record.addedNodes) {
         adjustElement(node, s);
         node.querySelectorAll?.("*").forEach(element => adjustElement(element, s));
       }
     });
-    s.observer.observe(document.documentElement, { childList: true, subtree: true });
+    s.observer.observe(document.documentElement, { childList: true, subtree: true, ...(s.mode === "full" ? { characterData: true, attributes: true, attributeFilter: ["style", "class", "src", "width", "height"] } : {}) });
   }
 
   async function settle(id, x, y, relative) {
     requireSession(id);
     const move = () => {
-      const r = relative ? resolveRegion(requireSession(id)) : null;
-      window.scrollTo({ left: x + (r?.x || 0), top: y + (r?.y || 0), behavior: "instant" });
+      const s = requireSession(id);
+      const view = targetView(s);
+      const r = relative ? resolveRegion(s) : null;
+      const element = s.target?.element;
+      (element || window).scrollTo({ left: x + (r?.x || 0) - (element ? view.x - element.scrollLeft : 0),
+        top: y + (r?.y || 0) - (element ? view.y - element.scrollTop : 0), behavior: "instant" });
     };
     move();
     let previous = "", stable = 0;
@@ -236,12 +326,13 @@
       const view = regionView(s);
       const signature = JSON.stringify(view.region ? {
         x: view.x - view.region.x, y: view.y - view.region.y,
-        width: view.region.width, height: view.region.height } : view);
+        width: view.region.width, height: view.region.height } : { x: view.x, y: view.y, innerWidth: view.innerWidth, innerHeight: view.innerHeight });
       const imagesLoading = [...document.images].some(img => {
         if (img.complete) return false;
         const rect = img.getBoundingClientRect();
-        if (view.region && (rect.right + scrollX <= view.region.x || rect.left + scrollX >= view.region.x + view.region.width ||
-            rect.bottom + scrollY <= view.region.y || rect.top + scrollY >= view.region.y + view.region.height)) return false;
+        const a = targetPoint(s, rect.left, rect.top), b = targetPoint(s, rect.right, rect.bottom);
+        if (view.region && (b.x <= view.region.x || a.x >= view.region.x + view.region.width ||
+            b.y <= view.region.y || a.y >= view.region.y + view.region.height)) return false;
         return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
       });
       stable = signature === previous && !imagesLoading ? stable + 1 : 0;
@@ -269,12 +360,23 @@
     const $ = id => shadow.getElementById(id);
     const values = () => Object.fromEntries(["left", "right", "top", "bottom"].map(key => [key, Number($(key).value)]));
     const update = () => {
-      const v = values();
-      $("outline").style.cssText = `left:${v.left - scrollX}px;top:${v.top - scrollY}px;width:${Math.max(0, v.right - v.left)}px;height:${Math.max(0, v.bottom - v.top)}px`;
+      let v = values();
+      if (s.anchors?.first && s.anchors?.second) {
+        try {
+          s.edges = v;
+          const r = resolveRegion(s);
+          v = { left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height };
+          for (const key of Object.keys(v)) $(key).value = v[key];
+        } catch { /* Start reports invalid anchors. */ }
+      }
+      const view = targetView(s);
+      $("outline").style.cssText = `left:${v.left - view.x + view.viewportRect.left}px;top:${v.top - view.y + view.viewportRect.top}px;width:${Math.max(0, v.right - v.left)}px;height:${Math.max(0, v.bottom - v.top)}px`;
+      for (const key of ["left", "right", "top", "bottom"]) $(key).disabled = !!s.target;
+      if (s.target) $("hint").textContent = "已选择内部滚动容器；边界显示容器内坐标，请用点选调整。";
     };
-    window.addEventListener("scroll", update, { passive: true });
-    s.removeSelectionListener = () => window.removeEventListener("scroll", update);
-    shadow.addEventListener("input", () => { s.anchors = null; update(); });
+    document.addEventListener("scroll", update, { passive: true, capture: true });
+    s.removeSelectionListener = () => document.removeEventListener("scroll", update, true);
+    shadow.addEventListener("input", () => { s.anchors = null; s.target = null; update(); });
     for (const [button, keys] of [["first", ["left", "top"]], ["second", ["right", "bottom"]]]) {
       $(button).onclick = () => {
         $("picker").hidden = false;
@@ -284,9 +386,11 @@
           try {
             s.anchors ||= {};
             s.anchors[button] = anchorAt(s, event.clientX, event.clientY);
+            detectTarget(s);
           } catch (error) { $("hint").textContent = error.message; return; }
-          $(keys[0]).value = Math.round(event.clientX + scrollX);
-          $(keys[1]).value = Math.round(event.clientY + scrollY);
+          const point = targetPoint(s, event.clientX, event.clientY);
+          $(keys[0]).value = point.x;
+          $(keys[1]).value = point.y;
           $("picker").hidden = true;
           update();
         };
@@ -322,8 +426,18 @@
       }
       if (m.type === "SHOW_UI") { if (progress) progress.host.style.setProperty("visibility", "visible", "important"); return {}; }
       if (m.type === "TOUCH") return {};
-      if (m.type === "PREPARE") { s.edges = m.edges || s.edges; prepare(s); return measure(); }
+      if (m.type === "PREPARE") { s.edges = m.edges || s.edges; prepare(s); return targetView(s); }
+      if (m.type === "FULL_RESET") { s.fullProof = { nodes: new Map(), end: 0, invalid: false }; return {}; }
+      if (m.type === "MEASURE" && m.watch) fullProof(s, true);
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y, m.relative);
+      if (m.type === "BOTTOM") {
+        fullProof(s);
+        const loading = [...document.images].some(img => {
+          const r = img.getBoundingClientRect();
+          return !img.complete && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
+        });
+        return { ...measure(), loading };
+      }
       if (m.type === "MEASURE") return m.viewportOnly
         ? { ...measure(), anchored: !!(s.anchors?.first && s.anchors?.second) } : regionView(s);
       throw new Error("未知页面消息。");

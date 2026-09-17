@@ -106,3 +106,16 @@ test("failure after export revokes its pending URL and permits restart", async (
   assert.equal(h.urls.size, 0);
   assert.equal((await open(h)).ok, true);
 });
+
+test('end extension preserves a bounded canvas and isolates stale extension messages', async () => {
+  const h = harness();await open(h);
+  await h.send('PART','a',{start:0,height:1200});
+  assert.equal((await h.send('EXTEND','old',{region:{x:0,y:0,width:800,height:2000}})).ok,false);
+  const extended=await h.send('EXTEND','a',{region:{x:0,y:0,width:800,height:2000}});
+  assert.equal(extended.ok,true);assert.equal(extended.height,2000);
+  assert.equal(h.canvases[0].height,1);assert.equal(h.canvases.at(-1).height,2000);
+  const reduced=await h.send('EXTEND','a',{region:{x:0,y:0,width:800,height:20000}});
+  assert.equal(reduced.ok,true);assert.equal(reduced.height,16384);
+  assert.ok(reduced.width*reduced.height<=16000000);
+  await h.send('CLOSE');assert.ok(h.canvases.every(c=>c.width===1));
+});

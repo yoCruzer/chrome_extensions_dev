@@ -34,19 +34,21 @@
 
 - 普通页面单遍处理：滚到当前块，等待几何和可见图片稳定，立即截图并绘制，再前往下一块；不再无条件完整预滚动一遍。
 - 整页每块至少约 480 ms、区域约 240 ms 稳定等待；区域等待比较局部几何，不等待整个 document 静止。可见图片或局部几何在 5 秒内仍不稳定就有界重试／失败。截图调用间隔至少 550 ms，遵守 Chrome 限流。
-- 整页截图中发现文档高度变化时，丢弃当前画布，最多重试一次保守预加载路径；重试后仍变化则失败。不会把旧坐标拼成成功结果。Region 的规则见下节。
+- 整页允许底部追加：扩展终点和画布，保留已捕获像素。已捕获区域的几何见证或 DOM 变更显示旧坐标失效时，丢弃画布，最多从头重启一次；不会混合两次布局的帧。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
 - 支持横向及纵向拼接，以实际可见坐标裁剪、按绝对输出边界取整，避免累计接缝误差。
 - 页面状态面板使用 Shadow DOM。截图前隐藏，并等待两次动画帧重绘；截图后恢复，面板不进入最终 PNG。
-- 一次仅保留当前帧和一个有界画布；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
+- 通常仅保留当前帧和一个有界画布；动态扩展时短暂保留新旧两个画布，拷贝后立即释放旧画布。Auto 扩展超出原比例预算时会下采样已有像素；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
 - 编码完成后释放画布，下载完成后撤销 Blob URL。成功、失败、取消均恢复原始滚动及临时改动的内联样式与优先级。
 - 任务 ID 隔离过期消息；worker 重启清理旧任务并提示中断。启动时残留 offscreen 关闭失败不会永久阻塞 ready，后续新任务会再次清理。页面端另有 30 秒租约恢复机制。
-- 单阶段最多 1000 步，任务最多 15 分钟；持续增长的页面会被停止。
+- 最多 1000 次截图、15 分钟、12 次终点扩展，终点不超过初始高度两倍与初始高度加 4 屏中的较大值；持续增长会提示改用选择区域。
 
 ## Region：在捕获布局上选择视觉区域
 
 进入 Region 时先建立捕获布局，再显示选择 UI：关闭平滑滚动、scroll snap、滚动锚定，暂停 CSS 动画／过渡并隐藏 caret。对符合启发式的 fixed/sticky 覆盖层仅隐藏可见性、保留占位，不改 `position`。点选后 PREPARE 只移除选择 UI 并锁定输入，不再重写普通文档流。取消、失败、成功均恢复样式、优先级和原始滚动位置。Full Page 保留原有 fixed 隐藏／sticky position 处理。
 
-两角保存当前 document 中的 Element 引用、原矩形、局部 offset、归一化比例及四边距离。尺寸未变时使用精确 offset；resize 后，左上角靠近左／上边缘、右下角靠近右／下边缘的轴保留该边 inset（边缘带为 24px 与原轴长度 10% 的较小值），其它轴使用比例。锚点消失、隐藏、零尺寸或选区无效才拒绝解析。这是视觉点锚定，不是字符或正文语义识别。修改数字会清除锚点，回到固定 document 坐标；只点选一角也使用数字边界。
+两角先选择最内层共同可滚动祖先（auto/scroll/overlay 且内容超过 client 尺寸），否则使用 window。内部容器使用 `clientPoint - targetViewportOrigin + targetScroll` 坐标；容器边框、可见裁剪与 bitmap 比例参与逐帧取样，只拼所选内容。选择框监听捕获阶段 scroll 事件，数字字段在内部容器模式禁用并标明坐标语义。成功、取消、失败及 worker 中断恢复 window 与已选容器滚动；容器被移除或替换立即失败，容器视口 resize 最多重启一次。
+
+两角保存当前 document 中的 Element 引用、原矩形、局部 offset、归一化比例及四边距离。尺寸未变时使用精确 offset；resize 后，左上角靠近左／上边缘、右下角靠近右／下边缘的轴保留该边 inset（边缘带为 24px 与原轴长度 10% 的较小值），其它轴使用比例。锚点消失、隐藏、零尺寸或选区无效才拒绝解析。这是视觉点锚定，不是字符或正文语义识别。修改数字会清除锚点，回到固定 document 坐标；window 模式只点选一角也使用数字边界。
 
 点击开始后，在捕获布局上建立环境基线：目标 tab、`innerWidth/innerHeight`、`chrome.tabs.getZoom()` 和 `visualViewport.scale`。scale 使用 `0.0001` epsilon；clientWidth/clientHeight、document 宽高和 DPR 仅记录诊断，不是 Region fatal invariant。不会拿最初 BEGIN 的页面快照永久比较。真实位图决定源像素比例，拼图仍拒绝不一致的实际 bitmap 尺寸。
 
@@ -56,11 +58,13 @@
 
 状态接口及 `chrome.storage.session` 中的 `status` 保留 `reasonCode`、`attempt`、`diagnostics`：环境 baseline/actual、具体差异字段、两角 connected／原始及当前 rect／resolved point／resolver mode，以及区域 before/current。例：`CAPTURE_ENV_CHANGED: innerWidth 900 -> 880`。其它代码包括 `ANCHOR_UNRESOLVABLE`、`REGION_INVALID`、`REGION_REFLOW`、`FRAME_NOT_SETTLED` 和目标 tab 变化；不记录 DOM 或正文文本。
 
+Full Page diagnostics 包含 `initialHeight`、`maxObservedHeight`、`endExtensions`、`bottomStableSamples`、`fullPageRestarts`、`terminationReason`。正常结束为 `BOTTOM_QUIESCENT`，无限增长预算为 `FULL_GROWTH_LIMIT`，不稳定重排为 `FULL_REFLOW`；不记录正文或 DOM dump。
+
 ## 已知限制
 
-fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复；未增加全页面 class/style 监听。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
+fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复。Full Page 通过已观察的可见叶元素矩形及捕获区 DOM 变更保守判断重排，不构建语义 DOM 或全文指纹；最多记录 20,000 个几何见证。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
 
-不支持虚拟列表、无限 feed、iframe 内部独立滚动、独立滚动容器、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。持续可观察的选区 reflow 会有界失败；固定数字坐标不承诺跟随内容重排。锚点是按边缘距离／比例解析的视觉点，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
+不支持虚拟列表、无限 feed、iframe 内部独立滚动、任意二维嵌套滚动、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。持续可观察的选区 reflow 会有界失败；固定数字坐标不承诺跟随内容重排。锚点是按边缘距离／比例解析的视觉点，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
 
 ## 开发与测试
 
@@ -74,6 +78,8 @@ DYNAMIC_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 RELIABILITY_ONLY=csdn node long-page-screenshot-v2/tests/browser.mjs
 RELIABILITY_ONLY=chat node long-page-screenshot-v2/tests/browser.mjs
 COMPLEX_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+NESTED_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+ADAPTIVE_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 ```
 

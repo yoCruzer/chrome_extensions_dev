@@ -1,5 +1,5 @@
 import { regionFromEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
-import { visibleTile, checkHeight, MAX_STEPS } from "./capture/planner.js";
+import { visibleTile, adaptiveEnd, MAX_STEPS } from "./capture/planner.js";
 
 let active = null;
 let lastStatus = { state: "idle", message: "准备就绪" };
@@ -62,6 +62,7 @@ async function finish(s, error) {
   }
   lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
     metrics: { ...s.metrics, totalMs: Date.now() - s.started },
+    ...(s.mode === "full" ? { reasonCode: error?.reasonCode, diagnostics: { ...s.full, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
     ...(s.mode === "region" ? { reasonCode: error ? error.reasonCode || "CAPTURE_FAILED" : undefined,
       attempt: s.attempt || 1, diagnostics: { ...s.diagnostics, ...error?.diagnostics } } : {}),
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
@@ -109,6 +110,10 @@ function validateView(s, view) {
   if (s.mode === "region") {
     s.lastView = view;
     validateEnvironment(s, { ...view, tabZoom: view.tabZoom ?? s.environment.tabZoom, tabId: s.tab.id });
+    if (view.targetKind === "element" && s.targetViewport &&
+        (view.clientWidth !== s.targetViewport.width || view.clientHeight !== s.targetViewport.height)) {
+      throw Object.assign(new Error("滚动容器尺寸发生变化，正在重新截图。"), { layout: true, reasonCode: "TARGET_RESIZED" });
+    }
     validateRegion(s, view);
     return;
   }
@@ -177,10 +182,13 @@ async function captureOnce(s, view) {
   await ensureVisible(s);
   await request(s, "content", "HIDE_UI");
   try {
+    if (s.mode === "full") {
+      validateView(s, await request(s, "content", "MEASURE", { watch: true }));
+    }
     if (s.mode === "region") {
       const before = await request(s, "content", "MEASURE");
       validateView(s, before);
-      if (before.x !== view.x || before.y !== view.y || before.region.x !== view.region.x || before.region.y !== view.region.y) {
+      if (before.x !== view.x || before.y !== view.y || before.region.x !== view.region.x || before.region.y !== view.region.y || before.viewportRect?.left !== view.viewportRect?.left || before.viewportRect?.top !== view.viewportRect?.top) {
         throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true, reasonCode: "FRAME_MOVED" });
       }
     }
@@ -190,8 +198,8 @@ async function captureOnce(s, view) {
     await ensureVisible(s);
     const after = await request(s, "content", "MEASURE");
     validateView(s, after);
-    if (s.mode === "full" && after.height !== view.height) throw Object.assign(new Error("截图时页面高度发生变化。"), { layout: true });
-    if (s.mode === "region" && (after.region.x !== view.region.x || after.region.y !== view.region.y)) {
+    if (s.mode === "full") await extendEnd(s, after);
+    if (s.mode === "region" && (after.region.x !== view.region.x || after.region.y !== view.region.y || after.viewportRect?.left !== view.viewportRect?.left || after.viewportRect?.top !== view.viewportRect?.top)) {
       throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true });
     }
     if (after.x !== view.x || after.y !== view.y) throw new Error("截图时页面发生移动，请重试。");
@@ -201,26 +209,28 @@ async function captureOnce(s, view) {
   }
 }
 
-async function warm(s) {
-  await status(s, "loading", "正在预滚动加载图片…（Esc 取消）");
-  const initial = s.viewport.height;
-  let y = s.mode === "region" ? s.region.y : 0;
-  for (let step = 0; step < MAX_STEPS; step++) {
-    const view = await scroll(s, s.region?.x || 0, y);
-    checkHeight(initial, view.height, view.clientHeight);
-    const end = s.mode === "region" ? s.region.y + s.region.height : view.height;
-    if (end > view.height) throw new Error("页面变短，选区超出页面范围。");
-    if (view.y > y + 0.01 || view.y + view.clientHeight <= y) throw new Error("页面阻止了预滚动，请重试。");
-    if (view.y + view.clientHeight >= end) {
-      // Return to the start after lazy loading: the capture uses this final height.
-      const first = await scroll(s, s.region?.x || 0, s.region?.y || 0);
-      if (s.mode === "full") s.region = { x: 0, y: 0, width: first.width, height: first.height };
-      s.stableHeight = first.height;
-      return first;
-    }
-    y = Math.min(end - 1, view.y + view.clientHeight - 32);
+async function extendEnd(s, view) {
+  if (!adaptiveEnd(s.full, view.height, view.clientHeight)) return;
+  s.region = { ...s.region, height: s.full.end };
+  if (s.offscreen) s.outputSize = await request(s, "offscreen", "EXTEND", { region: s.region });
+}
+
+async function bottomQuiescence(s) {
+  // Four stable 200ms observations; visible lazy images must also be ready.
+  const started = Date.now();
+  s.full.bottomStableSamples = 0;
+  while (Date.now() - started < 3000) {
+    await delay(200);
+    await ensureVisible(s);
+    const view = await request(s, "content", "BOTTOM");
+    validateView(s, view);
+    const previous = s.full.end;
+    await extendEnd(s, view);
+    if (s.full.end > previous) return false;
+    s.full.bottomStableSamples = view.loading ? 0 : s.full.bottomStableSamples + 1;
+    if (s.full.bottomStableSamples >= 4) return true;
   }
-  throw new Error("页面过长或持续增长，请缩小选区。");
+  throw Object.assign(new Error("页面底部仍在加载，请稍后重试或改用选择区域。"), { reasonCode: "BOTTOM_NOT_QUIESCENT" });
 }
 
 async function saveImage(s, url) {
@@ -271,6 +281,7 @@ async function run(s) {
           for (let sample = 0; sample < 3; sample++) {
             try {
               const resolved = await request(s, "content", "MEASURE");
+              s.targetViewport = { width: resolved.clientWidth, height: resolved.clientHeight };
               s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
                 right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
               validateView(s, resolved);
@@ -283,14 +294,15 @@ async function run(s) {
               s.metrics.frameRetries++;
             }
           }
-        } else if (attempt) {
-          s.metrics.retries++;
-          await status(s, "loading", "布局发生变化，正在安全预加载并重新截图…");
-          view = await warm(s);
         } else {
-          view = await scroll(s, s.region?.x || 0, s.region?.y || 0);
-          if (s.mode === "full") s.region = { x: 0, y: 0, width: view.width, height: view.height };
-          s.stableHeight = view.height;
+          if (attempt) s.metrics.retries++;
+          await request(s, "content", "FULL_RESET");
+          view = await scroll(s, 0, 0);
+          s.region = { x: 0, y: 0, width: view.width, height: view.height };
+          s.full ||= { initialHeight: view.height, maxObservedHeight: view.height, endExtensions: 0, bottomStableSamples: 0 };
+          s.full.end = view.height;
+          s.full.fullPageRestarts = attempt;
+          s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
         }
         // Reject impossible fixed sizes before the first screenshot. Device scale
         // is checked again against the actual first bitmap (not emulated DPR).
@@ -306,13 +318,16 @@ async function run(s) {
         s.outputSize = scale;
         await request(s, "offscreen", "PART", { start: 0, height: scale.height });
         let y = s.region.y;
-        while (y < s.region.y + s.region.height - 0.0001) {
+        while (true) {
+          if (y >= s.region.y + s.region.height - 0.0001) {
+            if (s.mode !== "full" || await bottomQuiescence(s)) break;
+          }
           let x = s.region.x, bandBottom;
           while (x < s.region.x + s.region.width - 0.0001) {
             if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
             if (!dataUrl) {
               view = await scroll(s, x, y);
-              if (s.mode === "full" && view.height !== s.stableHeight) throw Object.assign(new Error("页面高度仍在变化，请等待加载完成后重试。"), { layout: true });
+              if (s.mode === "full") await extendEnd(s, view);
               ({ view, dataUrl } = await capture(s, view));
             }
             const tileView = relativeView(s, view);
@@ -331,7 +346,7 @@ async function run(s) {
           await ensureVisible(s);
           validateView(s, await request(s, "content", "MEASURE"));
         }
-        await status(s, "encoding", `正在生成图片 · ${scale.width} × ${scale.height} 像素…`);
+        await status(s, "encoding", `正在生成图片 · ${s.outputSize.width} × ${s.outputSize.height} 像素…`);
         const encodeStart = Date.now();
         const { url } = await request(s, "offscreen", "EXPORT");
         s.metrics.encodeMs += Date.now() - encodeStart;

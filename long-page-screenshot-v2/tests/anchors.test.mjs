@@ -8,7 +8,7 @@ function fixture() {
   const rect = { left: 10, top: 20, width: 500, height: 8000, right: 510, bottom: 8020 };
   const element = { isConnected: true, getBoundingClientRect: () => rect };
   const context = { document: { elementFromPoint: () => element }, scrollX: 0, scrollY: 0,
-    progress: null, getComputedStyle: () => ({ visibility: 'visible', opacity: '1' }) };
+    progress: null, targetPoint: (s, x, y) => ({x, y}), getComputedStyle: () => ({ visibility: 'visible', opacity: '1' }) };
   vm.runInNewContext(source.slice(source.indexOf('  function anchorAt'), source.indexOf('  function regionView')), context);
   const s = { host: { style: { setProperty() {}, removeProperty() {} } }, edges: {left:10,top:20,right:500,bottom:8010} };
   s.anchors = { first: context.anchorAt(s, 10, 20), second: context.anchorAt(s, 500, 8010) };

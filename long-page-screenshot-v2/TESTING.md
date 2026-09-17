@@ -1,4 +1,6 @@
-# Region Reliability Reset 验证
+# V2 验证记录
+
+## 前一轮 Region Reliability Reset（历史基线）
 
 2026-09-17，开发基线 `2677e2ce6e69e019cba7ba717cc42560c5d0d602`，已 fetch 并确认开始时本地与 origin/main 一致。仅修改 V2。Node 24.19.0，Chrome 152.0.7977.84，隔离临时 profile／下载目录；正式 manifest 未增加权限。
 
@@ -56,6 +58,41 @@ NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 
 ## 限制
 
-视觉点锚定不是文字语义锚定；元素被替换仍需重选。虚拟列表、独立滚动容器、iframe、Shadow DOM 内部捕获与无限 feed 不在本轮范围。相同区域外框内的语义替换或 Canvas／视频变化无法由几何验证保证一致；不再宣称全 DOM fingerprint 能证明内容稳定。固定数字坐标不跟随内容 reflow。可观察的持续区域几何变化会失败，不输出伪成功 PNG。
+视觉点锚定不是文字语义锚定；元素被替换仍需重选。此历史基线尚不支持独立滚动容器；下方 Modern Web Reliability 已增加垂直容器 Region 支持。虚拟列表、iframe、Shadow DOM 内部捕获与无限 feed 仍不支持。相同区域外框内的语义替换或 Canvas／视频变化无法由几何验证保证一致；不再宣称全 DOM fingerprint 能证明内容稳定。固定数字坐标不跟随内容 reflow。可观察的持续区域几何变化会失败，不输出伪成功 PNG。
 
 未自动化系统原生保存对话框和 Finder 窗口视觉状态；验证真实下载路径及 downloads.show API。未测量浏览器总 RSS；画布预算及释放仍有回归覆盖。测试均为确定性本地 fixture，不是外网实站认证。
+
+## Modern Web Reliability — Phase A 定向验证
+
+新增独立 `test-nested-page.html`，html/body 固定高度且 overflow:hidden，620px conversation 内有 4800px 确定性 canvas 内容。`NESTED_ONLY=1` 真实 Chrome 定向通过：同屏、4180px 跨屏（window.scrollY 始终为 0）、全部 RGBA 行包含 TOP/MIDDLE/BOTTOM、外部 header/composer 排除、成功/取消恢复、容器删除/替换无 PNG、offscreen 清理。日志产物：`screenshot-v2-test-oyIcfj` 临时目录。此阶段没有运行完整回归。
+
+Region 支持 window 与 scrollable element CaptureTarget：两锚点最内共同可滚动祖先，无站点 selector；坐标为容器内容坐标，截图按浏览器中的容器可见 rect 加实际 bitmap 比例裁剪。数字字段对内部容器禁用，滚动捕获监听更新边框；容器尺寸变化有界重试一次，消失立即失败。已有文档坐标模式保持兼容。
+
+## Modern Web Reliability — Phase B 定向验证
+
+`ADAPTIVE_ONLY=1` 已在真实 Chrome 通过静态、单次追加、三次追加、插入已捕获区、重复插入、无限增长六组。成功 PNG 与整个 fixture 的参考 RGBA 每行比较，包含延迟加载图片、recommendation 及最终 bottom marker。静态 2400px 零重启；2400→3220 一次扩展；2400→4860 三次扩展且零重启；上方插入一次重启后正确；重复插入第二次失败；增长至 5680 超预算失败，均无伪成功 PNG、offscreen 残留。定向产物 `screenshot-v2-test-FPjDs7`。此前没有运行完整回归。
+
+旧规则 `stableHeight`／任意高度变化重试与 warm 预加载路径已删除。现在基于已观察的叶元素几何和捕获区 DOM 变更区分底部追加与旧坐标失效；底部追加 EXTEND 保留像素，失效只允许一次丢弃并重启。200ms × 4 次稳定采样且可见图片就绪，底部等待上限 3 秒。增长上限 `max(initialHeight*2, initialHeight+4*viewportHeight)`、12 次扩展、1000 次 capture、15 分钟。Auto 扩展时仍维持画布预算，必要时缩放既有画布；新旧画布仅在扩展拷贝期间短暂共存。Node 补充增长量／扩展次数／缩短、canvas 扩展／stale 隔离测试。
+
+Phase A 扩展验证 `screenshot-v2-test-KW1Ujd`：容器高度 620→500px 后一次重启、全行像素正确；真实关闭 service worker 后，原始 element/window scroll 恢复且 offscreen 清空。目标检测 Node 覆盖最内共同祖先、window fallback、border/local mapping、原始滚动记录和 detached target。
+
+## Modern Web Reliability — 最终统一回归（2026-09-17）
+
+两个阶段定向通过后，仅运行一次完整矩阵，全部退出码 0。日志：`/tmp/modern-web-final-nilplzfg/`，Node 24.19.0、Chrome 152.0.7977.84。生产 manifest 无修改，截图仍来自真实 captureVisibleTab → offscreen → downloads。
+
+| 组 | 结果与主要证据 |
+| --- | --- |
+| Node | 39/39；含目标检测/坐标、增长预算、源比例、画布扩展/stale、资源清理 |
+| base | 10337 行横纵块逐行正确、125% zoom、模拟 DPR、取消/stale、lazy reflow、真实 worker 中断、下载失败恢复 |
+| output | Auto/CSS/75/50/device、进度 UI 不入图、保存路径/Finder 调用、取消、26000px 自动缩小及超限拒绝 |
+| dynamic | banner 平移、bitmap 时变更、resize 前/中/后、两次 reflow 失败、锚点删除与真实环境诊断 |
+| csdn | 同屏/跨屏逐像素、client/DPR 非 fatal、一次 resize、window/zoom/visualScale/tab 改变失败 |
+| chat | 旧聊天布局同屏/跨屏逐像素；保留 sticky 布局行为 |
+| complex | 18 张 lazy 图片、定时增长、fixed/sticky 恢复、正文边框连续、取消/stale/offscreen 故障恢复 |
+| nested | window.scrollY=0、element.scrollTop=4180、同屏/跨屏全像素及 TOP/MIDDLE/BOTTOM、排除 shell；resize 一次重启、取消/移除/替换、真实 worker 中断 |
+| adaptive | 2400→3220 与 2400→4860（3 次扩展）全 RGBA 正确；图片/最终 marker 完整；一次重排正确重启、二次重排失败、5680px 无限增长预算失败；静态零重启 |
+| retina | 原生 2× 位图 device 1000×3200；Auto/CSS/75/50 尺寸和像素检查，真实 downloads.show API |
+
+仅修改 V2 的 runtime、README/TESTING 和 V2 tests/fixtures。没有 V0.1、SmartWebCapture 或其它扩展修改；没有新增站点 selector、权限、框架或构建系统，临时 profile/PNG/日志均未入库。
+
+剩余边界：主目标是普通垂直内部容器；不支持虚拟列表、iframe 内滚动、任意二维嵌套滚动和无限 feed。Full Page 的几何见证/DOM 观察不是像素冻结，Canvas/视频与未观察的绘制变化仍不能保证跨帧一致性；Auto 多次扩展缩放可能降低已有内容清晰度，扩展时短暂需要双画布内存。底部稳定是有界时间判定，不承诺捕获稳定窗口之后才出现的内容。未访问真实 CSDN/ChatGPT，本报告仅证明本地确定性 fixture 与回归矩阵通过。

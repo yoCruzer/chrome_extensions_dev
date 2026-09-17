@@ -47,7 +47,7 @@ async function handle(m) {
     const bitmap = await decode(m.dataUrl);
     try {
       const scale = outputGeometry(m.region, m.view, bitmap, m.output);
-      session = { id: m.id, region: m.region, scale, bitmapWidth: bitmap.width, bitmapHeight: bitmap.height };
+      session = { id: m.id, region: m.region, scale, output: m.output, view: m.view, bitmapWidth: bitmap.width, bitmapHeight: bitmap.height };
       return scale;
     } finally { bitmap.close(); }
   }
@@ -61,6 +61,17 @@ async function handle(m) {
     session.context = session.canvas.getContext("2d", { alpha: false });
     if (!session.context) throw new Error("无法创建截图画布。");
     return {};
+  }
+  if (m.type === "EXTEND") {
+    if (!session.canvas || m.region.height < session.region.height || m.region.width !== session.region.width) throw new Error("无效的画布扩展。");
+    const scale = outputGeometry(m.region, session.view, { width: session.bitmapWidth, height: session.bitmapHeight }, session.output);
+    const canvas = new OffscreenCanvas(scale.width, scale.height);
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) throw new Error("无法扩展截图画布。");
+    context.drawImage(session.canvas, 0, 0, scale.width, Math.round(session.region.height * scale.scaleY));
+    session.canvas.width = session.canvas.height = 1;
+    Object.assign(session, { canvas, context, scale, region: m.region });
+    return scale;
   }
   if (m.type === "FRAME") {
     if (!session.context || !session.canvas) throw new Error("拼图分片尚未创建。");

@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Nested conversation fixture</title>
+<style>
+html,body{height:100%;overflow:hidden;margin:0}body{display:grid;grid-template-rows:40px 1fr 40px;background:#00ffff}
+header,footer{background:#ff0000}#conversation{margin-left:80px;width:500px;overflow-y:auto;min-height:0}canvas{display:block}
+</style>
+<header>OUTSIDE HEADER</header><main id="conversation"></main><footer>OUTSIDE COMPOSER</footer>
+<script>
+const conversation=document.getElementById('conversation');
+for(let i=0;i<10;i++){
+ const canvas=document.createElement('canvas');canvas.width=500;canvas.height=480;
+ const ctx=canvas.getContext('2d');
+ for(let y=0;y<480;y++){const row=i*480+y;ctx.fillStyle=`rgb(${row%251},${Math.floor(row/251)},97)`;ctx.fillRect(0,y,500,1)}
+ ctx.fillStyle='white';ctx.font='20px monospace';ctx.fillText(i===0?'TOP':i===9?'BOTTOM':`MIDDLE ${i}`,100,80);
+ conversation.append(canvas);
+}
+</script>

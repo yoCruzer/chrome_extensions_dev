@@ -14,8 +14,16 @@ export function visibleTile(region, view, x, y, bandBottom) {
   return { x, y, right: Math.min(region.x + region.width, view.x + view.clientWidth), bottom };
 }
 
-export function checkHeight(initial, current, viewport) {
-  if (current > Math.max(initial * 2, initial + viewport * 4)) {
-    throw new Error("页面持续增长，可能是无限滚动。请改用固定选区。");
+export const MAX_END_EXTENSIONS = 12;
+export function adaptiveEnd(state, height, viewport) {
+  state.maxObservedHeight = Math.max(state.maxObservedHeight, height);
+  if (height < state.end) throw Object.assign(new Error("页面内容缩短，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" });
+  if (height === state.end) return false;
+  if (height > Math.max(state.initialHeight * 2, state.initialHeight + viewport * 4) || state.endExtensions >= MAX_END_EXTENSIONS) {
+    throw Object.assign(new Error("页面持续增长，可能是无限滚动；请改用选择区域。"), { reasonCode: "FULL_GROWTH_LIMIT" });
   }
+  state.end = height;
+  state.endExtensions++;
+  state.bottomStableSamples = 0;
+  return true;
 }
