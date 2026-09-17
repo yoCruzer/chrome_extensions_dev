@@ -33,7 +33,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   for (const id of ['fixed-background', 'tiny-fixed']) assert.equal((await styles())[id], before[id]);
   const full = await waitFor(s => !s.busy);
   assert.equal(full.state, 'complete', JSON.stringify(full));
-  assert.ok(full.parts >= 2);
+  assert.equal(full.parts, 1);
   assert.equal(await page.locator('img[data-loaded="true"]').count(), 18);
   assert.equal(await page.locator('.dynamic-panel').count(), 1);
   const fullFiles = await filesFor(since);
@@ -49,7 +49,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   }
   await assertRestored(before, position);
   await writeFile(join(root, 'complex-full-result.json'), JSON.stringify({ full, fullFiles, expectedHeight }, null, 2));
-  console.log('PASS complex full: multi-part bottom, 18 lazy images, timed growth, fixed/sticky handling and restoration');
+  console.log('PASS complex full: single-PNG bottom, 18 lazy images, timed growth, fixed/sticky handling and restoration');
 
   const edges = await regionEdges();
   const regionSince = await downloadIds();

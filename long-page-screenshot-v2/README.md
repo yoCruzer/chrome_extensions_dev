@@ -1,97 +1,67 @@
 # Long Page Screenshot V2
 
-一个无构建步骤、无运行时依赖的 Manifest V3 长截图扩展。所有图像在本机处理。V2 是独立实现，未修改相邻的 `long-page-screenshot/`（V0.1）。
+无构建步骤、无运行时依赖的 Manifest V3 长截图扩展。图像全部在本机处理。V2 独立于相邻的 `long-page-screenshot/`（V0.1）。
 
-## 安装与使用
+## 安装与截图
 
-1. Chrome 116 或以上版本，打开 `chrome://extensions`，启用开发者模式。
-2. 点击「加载已解压的扩展程序」，选择本目录。
-3. 在普通网页上点击扩展图标，选择「截取整页」或「选择截图区域」。
-4. 自选区域支持填写左、右、上、下页面坐标（CSS 像素），或点击「点选左上角」，在页面点选后滚动，再「点选右下角」。确认四条边界后开始截图。
-5. 保持目标标签页在前台、窗口与缩放不变。按 Esc 或重新打开弹窗点「取消任务」。关闭弹窗不会取消任务。
-6. PNG 自动保存到默认下载目录的 `LongScreenshot/` 下；超长页以 `part-001`、`part-002` 顺序分片，无重复重叠。弹窗显示进度、成功、取消或具体失败原因。
+1. Chrome 116+ 打开 `chrome://extensions`，启用开发者模式，加载本目录。
+2. 在普通网页点击扩展图标，选择输出尺寸，然后选择「截取整页」或「选择截图区域」。
+3. 区域模式可以填写四条 CSS 坐标边界，也可以点选左上角，滚动后再点选右下角。
+4. 弹窗关闭后，页面右下角继续显示准备、等待内容稳定、截图帧数／进度、生成图片和保存状态。可点击面板「取消」或按 Esc。
+5. 完成后得到 **一张 PNG**。面板保留实际文件名、完整保存路径、像素尺寸和文件大小，直到手动关闭；点击「在 Finder 中显示」定位文件。
 
-本地 HTML 需要在扩展详情中开启「允许访问文件网址」。浏览器下载设置若要求逐次选择位置，需在两分钟内完成保存。
+截图时保持目标标签页在前台，窗口大小及缩放不变。本地 HTML 需要在扩展详情开启「允许访问文件网址」。
 
-## 架构与数据流
+## 输出尺寸
 
-```text
-popup → background / Capture Session → content（测量、选区、预滚动）
-                     ↓
-           tabs.captureVisibleTab（逐帧）
-                     ↓
-             offscreen（单个有界画布）
-                     ↓
-            downloads → 完成 → 释放 Blob
-```
+| 选项 | 语义 |
+| --- | --- |
+| 自动 · 单图优先（默认） | 在安全预算内选尽可能高的比例，上限为 CSS 100% 和实际源图比例；超长页自动缩小 |
+| 网页 100% | 1 CSS 像素约等于 1 输出像素，不随 Retina 默认翻倍 |
+| 75% | CSS 宽高分别乘 0.75 |
+| 50% | CSS 宽高分别乘 0.5 |
+| 原始设备分辨率 | 按 `captureVisibleTab` 实际位图／视口比例输出，通常文件最大 |
 
-- `background.js`：一个全局 Capture Session，记录随机任务 ID、标签页、模式、选区、生命周期、已处理帧、已保存分片和下载 ID；协调各组件和下载。
-- `content.js`：页面坐标、选区 UI、实际滚动、稳定性检查和页面恢复。使用隔离世界与 Shadow DOM，不识别页面语义。
-- `offscreen.js`：串行解码、绘制、编码；每帧关闭 ImageBitmap，导出后立即释放画布引用，每个 PNG 下载完成后撤销 Object URL。最后一个分片释放时清空整个会话；失败、显式关闭和文档卸载均清理资源。过期消息不会清理新会话。
-- `capture/geometry.js`：集中转换 CSS／图片像素坐标，依据截图实际宽高与视口计算比例，使用绝对边界取整，避免逐段舍入误差。
-- `capture/planner.js`：根据实际可见范围确定下一块；目标没有进入视口时停止，避免产生缺口。支持宽于视口的页面横向拼接。
+尺寸按最终绝对边界四舍五入。单图最多 16,000,000 像素，任一边最多 16,384 像素。固定比例超限会明确提示改用自动、更低比例或缩小区域，**不会静默输出 part 文件**。Auto 需要缩到 CSS 25% 以下时明确失败，建议缩小区域。设备模式先按页面 DPR 做保守预算检查，再以实际首帧位图复核尺寸；浏览器模拟 DPR 与真实位图不同的场景以实际图像决定最终输出。
 
-状态依次为 `preparing → selecting（可选）→ loading → capturing ↔ saving → complete`，异常进入 `failed` 或 `cancelled`。每条任务消息均验证 ID，旧消息不能结束新任务。并发启动会被拒绝。
+## 保存位置
 
-## 稳定性与内存边界
+`LongScreenshot/时间-标题.png` 只是建议文件名。扩展不覆盖 Chrome 的“下载前询问保存位置”设置，也不假设下载一定在 `~/Downloads`。
 
-- 先预滚动触发懒加载，再回到区域起点截图。每次滚动至少等待约 480 ms 的稳定几何，且等待可见图片；超过 5 秒仍不稳定则失败。
-- 选区提交时重新测量文档并验证四条边界；进入截图准备、预滚动和逐帧截图时持续复核。选区界面打开后文档尺寸或视口有变化，即使边界仍在页面内也会明确失败，需等页面稳定后重新选择，避免使用过时坐标。
-- 整页模式预加载期间允许页面高度合理增长；超过初始高度两倍或额外四个视口（取较大者）停止，避免追逐无限滚动。截图期间继续核对页面高度；若仍发生变化则报错重试，不把已过时的坐标拼成成功图片。
-- 每次截图前后检查当前标签页、视口、实际滚动位置及页面尺寸。切换标签页、导航、改变窗口／缩放会停止任务。
-- 截图间隔至少 550 ms，遵守 Chrome 每秒最多两次 `captureVisibleTab` 调用限制。
-- 单个输出画布最多 **16,000,000 像素**（RGBA 约 61 MiB），最高 8192 像素、最宽 16384 像素；另有一个当前视口的解码图像及短暂编码／消息副本。内存随输出宽度和视口而变，不随页面长度线性累积。浏览器自身的页面、GPU 和 PNG 编码内存不包含在画布预算中。
-- 一次只保留一个待下载 PNG。下载完成前不撤销 URL，不开启下一分片；失败／取消会取消未完成下载并清空拼图会话、关闭离屏文档。若关闭偶发失败，下一次截图会先清理残留文档再创建新的离屏文档。已经完成的分片保留，并明确提示整页未完成。
-- 通常在 `finally` 等效收尾路径恢复滚动和所改样式。页面端有 30 秒租约看门狗；后台意外终止时也会恢复。后台重启通过 `storage.session` 清理旧任务并标记中断，不尝试恢复丢失的画布。
-- 每个阶段最多 1000 次滚动／截图，整项任务最多 15 分钟；过大的页面请使用较小选区。
+只有 Downloads API 确认下载完成后才显示成功，路径来自该下载记录的 **`DownloadItem.filename`**。如果选择了别的目录或文件名，面板显示 Chrome 返回的实际路径。「在 Finder 中显示」调用 `chrome.downloads.show(downloadId)`。保存窗口或下载超过两分钟未完成会提示失败；尚未完成的下载会被取消。
 
-## 支持范围与限制
+## 速度、正确性和资源
 
-- 适用于浏览器顶层文档的博客、文档和普通网页，支持整页及固定矩形区域、水平和垂直拼接、常规 DPR／浏览器缩放。
-- 仅处理可能重复遮挡内容的可见元素：与视口相交、宽高均至少 16 CSS 像素、面积不超过视口 65%、非负 z-index；fixed 还须靠近视口边缘或有正 z-index，sticky 须具有吸附偏移。符合条件的 fixed 临时隐藏，sticky 保留在普通流并清除吸附偏移。预滚动会复核此前屏幕外的候选元素；结束后恢复内联值和 `!important` 优先级。大尺寸根容器、背景、微小装饰不会被一律隐藏。此判断是启发式，保留的浮层仍可能重复；依赖固定根容器的应用不适合此工具。
-- 不遍历 iframe、Shadow DOM 内部的固定元素；不展开折叠内容、不滚动独立滚动容器；只截取当前渲染状态。
-- 不支持无限信息流、虚拟列表、持续重新排版的页面、触控捏合缩放、Chrome 内部页面、受限页面。视频、canvas 动画及没有引起几何尺寸变化的异步内容不能保证时间一致性。网站弹窗仍需用户自行关闭。
-- CSS 动画和过渡暂停；无法冻结网站 JavaScript。已完成区域之后发生的同尺寸内容替换无法可靠识别。
-- 预加载先检查所选区域的纵向路径；其他横向区域的图片会在该块实际滚动到时等待加载。若它们改变文档尺寸，任务失败而不输出假成功。
-- 不包含 AI、OCR、文章提取、广告识别、站点适配器、云同步或图片编辑。
+- 普通页面单遍处理：滚到当前块，等待几何和可见图片稳定，立即截图并绘制，再前往下一块；不再无条件完整预滚动一遍。
+- 每块至少约 480 ms 稳定等待，可见图片或几何在 5 秒内仍不稳定就明确失败。截图调用间隔至少 550 ms，遵守 Chrome 限流。
+- 整页截图中发现文档高度变化时，丢弃当前画布，最多重试一次保守预加载路径；重试后仍变化则失败。不会把旧坐标拼成成功结果。选区模式在选择后遇到尺寸变化直接失败，要求重新选择。
+- 支持横向及纵向拼接，以实际可见坐标裁剪、按绝对输出边界取整，避免累计接缝误差。
+- 页面状态面板使用 Shadow DOM。截图前隐藏，并等待两次动画帧重绘；截图后恢复，面板不进入最终 PNG。
+- 一次仅保留当前帧和一个有界画布；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
+- 编码完成后释放画布，下载完成后撤销 Blob URL。成功、失败、取消均恢复原始滚动及临时改动的内联样式与优先级。
+- 任务 ID 隔离过期消息；worker 重启清理旧任务并提示中断。启动时残留 offscreen 关闭失败不会永久阻塞 ready，后续新任务会再次清理。页面端另有 30 秒租约恢复机制。
+- 单阶段最多 1000 步，任务最多 15 分钟；持续增长的页面会被停止。
 
-## 与 V0.1 的区别
+## 已知限制
 
-| 项目 | V0.1 | V2 |
-| --- | --- | --- |
-| 图像处理 | 保留全部截图再拼接 | 逐帧绘制，逐分片下载和释放 |
-| 拼接坐标 | 按预先计算的滚动位置 | 按实际视口验证与裁剪 |
-| 输出范围 | 当前视口宽度的整页 | 整页含横向溢出／用户矩形区域 |
-| 超长页 | 多分片但仍保留所有原图 | 有界画布，分片无重叠 |
-| 控制 | 基本启动 | 进度、取消、任务隔离、中断恢复 |
-| 动态页面 | 首次高度 | 预加载后定界，逐帧检查 |
+fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复；未增加全页面 class/style 监听。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
 
-## 测试
+不支持虚拟列表、无限 feed、iframe 内部独立滚动、独立滚动容器、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。JavaScript、视频、Canvas 动画、同尺寸内容替换和未改变文档尺寸的内部换位无法保证跨帧一致性。没有 AI、OCR、正文识别、网站适配器或编辑器。
 
-无依赖单元测试（Node.js 22+）：
+## 开发与测试
+
+`background.js` 协调任务；`content.js` 负责页面 UI、测量、滚动及恢复；`offscreen.js` 串行拼图；`capture/` 集中处理几何及块规划。保留内部 PART 协议，但默认流程只创建一个完整输出画布并下载一次。
 
 ```sh
 node --test long-page-screenshot-v2/tests/*.test.mjs
-```
-
-可选真实扩展集成测试（测试环境需要 Playwright、pngjs 和对应 Chromium，生产扩展没有这些依赖）：
-
-```sh
 node long-page-screenshot-v2/tests/browser.mjs
-```
-
-该测试在系统临时目录创建浏览器配置和下载目录，通过 Chrome 的扩展调试接口加载正式 manifest，并触发扩展按钮来授予 `activeTab`；不增加网站权限。需要支持 `Extensions.triggerAction` 的新版 Chrome／Chromium。可用 `CHROME_EXECUTABLE` 指定浏览器路径，`NODE_PATH` 指定测试依赖位置。测试走真实 `chrome.tabs.captureVisibleTab()`、offscreen、downloads 链路，不以 Playwright 截图代替扩展截图。断言每行颜色、选区尺寸、横向和纵向分片、底部、恢复、取消、旧消息和重启后的新任务。
-
-本地复杂页面位于仓库根目录的 `tests/fixtures/test-complex-page.html`。从仓库根目录启动本地服务：
-
-```sh
-python3 -m http.server 8000 --bind 127.0.0.1
-# 浏览器打开 http://127.0.0.1:8000/tests/fixtures/test-complex-page.html
+OUTPUT_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 COMPLEX_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 ```
 
-页面不请求任何外部资源：固定红色顶栏、黄色 sticky 侧栏、18 节正文、代码／表格、进入视口 180 ms 后加载的本地 SVG、打开后 2 秒插入的增高内容，以及平滑滚动和滚动吸附。选区时沿绿色正文边框点选两个角。点击「Insert another height-change panel」可验证选区失效；截图时按 Esc，检查滚动位置、顶栏和侧栏恢复后重新截图。
+测试需要 Node 22+，Chrome 集成另需 Playwright 和 pngjs；可通过 `NODE_PATH` 和 `CHROME_EXECUTABLE` 指定。使用临时配置及下载目录，正式 manifest 不增加主机权限；通过真实扩展 `captureVisibleTab`、offscreen 和 downloads 验证，不以自动化截图替代截图引擎。
 
-实测结果与指定网页的验收情况见 [TESTING.md](TESTING.md)。
+本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。详见 [TESTING.md](TESTING.md)。
 
-API 依据：[Chrome Tabs API](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Offscreen API](https://developer.chrome.com/docs/extensions/reference/api/offscreen)。
+API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Offscreen](https://developer.chrome.com/docs/extensions/reference/api/offscreen)、[Downloads](https://developer.chrome.com/docs/extensions/reference/api/downloads)。

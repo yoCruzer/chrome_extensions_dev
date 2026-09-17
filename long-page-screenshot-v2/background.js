@@ -1,4 +1,4 @@
-import { regionFromEdges, pixelEdge, sameViewport } from "./capture/geometry.js";
+import { regionFromEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
 import { visibleTile, checkHeight, MAX_STEPS } from "./capture/planner.js";
 
 let active = null;
@@ -11,14 +11,15 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const ready = (async () => {
   const saved = (await chrome.storage.session.get("status")).status;
   const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-  if (contexts.length) await chrome.offscreen.closeDocument();
+  if (contexts.length) await chrome.offscreen.closeDocument().catch(() => {});
   if (saved?.busy) {
     await chrome.tabs.sendMessage(saved.tabId, { target: "content", type: "FINISH", id: saved.id }).catch(() => {});
     if (saved.downloadId) await chrome.downloads.cancel(saved.downloadId).catch(() => {});
-    lastStatus = { ...saved, busy: false, state: "failed", message: "上次任务已中断，页面已恢复。已下载的分片可能不完整，请重新截图。" };
+    lastStatus = { ...saved, busy: false, state: "failed", message: "上次任务已中断，页面已恢复。请重新截图。" };
     await chrome.storage.session.set({ status: lastStatus });
+    await chrome.tabs.sendMessage(saved.tabId, { target: "content", type: "PROGRESS", id: saved.id, status: lastStatus }).catch(() => {});
   } else if (saved) lastStatus = saved;
-})();
+})().catch(() => { lastStatus = { busy: false, state: "failed", message: "启动恢复未完成，可以重新开始截图。" }; });
 
 function check(s) {
   if (active !== s || s.cancelled || s.finishing) throw new Error(s.reason || "截图已取消。");
@@ -31,6 +32,7 @@ async function status(s, state, message) {
   lastStatus = { id: s.id, tabId: s.tab.id, state, message, busy: true,
     frames: s.frames, parts: s.parts, downloadId: s.downloadId };
   await chrome.storage.session.set({ status: lastStatus });
+  await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "PROGRESS", id: s.id, status: lastStatus }, { frameId: 0 }).catch(() => {});
 }
 
 async function request(s, target, type, payload = {}) {
@@ -54,19 +56,22 @@ async function finish(s, error) {
     await chrome.runtime.sendMessage({ target: "offscreen", type: "CLOSE", id: s.id }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
   }
-  lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts,
+  lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
+    metrics: { ...s.metrics, totalMs: Date.now() - s.started },
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
-    message: error ? `${error.message}${s.parts ? ` 已保存 ${s.parts} 个分片，整页尚未完成。` : ""}` : `截图完成，已保存 ${s.parts} 个 PNG 分片。` };
+    message: error ? error.message : "截图完成，已保存一张 PNG。" };
+  await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "PROGRESS", id: s.id, status: lastStatus }, { frameId: 0 }).catch(() => {});
   try { await chrome.storage.session.set({ status: lastStatus }); }
   finally { if (active === s) active = null; }
 }
 
-async function start(mode) {
+async function start(mode, output = "auto") {
+  if (!["auto", "css", "75", "50", "device"].includes(output)) throw new Error("未知输出尺寸。");
   if (!["full", "region"].includes(mode)) throw new Error("未知截图模式。");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^(https?|file):\/\//.test(tab.url || "")) throw new Error("请在普通网页中使用；浏览器内部页面不支持截图。");
   if (active) throw new Error("已有截图任务，请先取消或等待完成。");
-  const s = { id: crypto.randomUUID(), tab, mode, started: Date.now(), frames: 0, parts: 0, cancelled: false };
+  const s = { id: crypto.randomUUID(), tab, mode, output, metrics: { captures: 0, settles: 0, encodeMs: 0, saveMs: 0, retries: 0 }, started: Date.now(), frames: 0, parts: 0, cancelled: false };
   active = s;
   try {
     await status(s, "preparing", "正在准备页面…");
@@ -106,6 +111,8 @@ function validateRegion(s, page) {
 }
 
 async function scroll(s, x, y) {
+  s.metrics.settles++;
+  await status(s, s.frames ? "capturing" : "loading", `正在等待当前内容稳定 / 加载 · 已处理 ${s.frames} 帧…`);
   await ensureVisible(s);
   const view = await request(s, "content", "SCROLL", { x: Math.floor(x), y: Math.floor(y) });
   validateView(s, view);
@@ -116,13 +123,20 @@ async function capture(s, view) {
   // Chrome allows at most two captureVisibleTab calls per second.
   await delay(Math.max(0, 550 - (Date.now() - lastCapture)));
   await ensureVisible(s);
-  lastCapture = Date.now();
-  const dataUrl = await chrome.tabs.captureVisibleTab(s.tab.windowId, { format: "png" });
-  await ensureVisible(s);
-  const after = await request(s, "content", "MEASURE");
-  validateView(s, after);
-  if (after.x !== view.x || after.y !== view.y || after.height !== view.height) throw new Error("截图时页面发生移动或尺寸变化，请重试。");
-  return dataUrl;
+  await request(s, "content", "HIDE_UI");
+  try {
+    lastCapture = Date.now();
+    s.metrics.captures++;
+    const dataUrl = await chrome.tabs.captureVisibleTab(s.tab.windowId, { format: "png" });
+    await ensureVisible(s);
+    const after = await request(s, "content", "MEASURE");
+    validateView(s, after);
+    if (after.height !== view.height) throw Object.assign(new Error("截图时页面高度发生变化。"), { layout: true });
+    if (after.x !== view.x || after.y !== view.y) throw new Error("截图时页面发生移动，请重试。");
+    return dataUrl;
+  } finally {
+    await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "SHOW_UI", id: s.id }, { frameId: 0 }).catch(() => {});
+  }
 }
 
 async function warm(s) {
@@ -147,18 +161,21 @@ async function warm(s) {
   throw new Error("页面过长或持续增长，请缩小选区。");
 }
 
-async function savePart(s, url) {
-  await status(s, "saving", `正在保存第 ${s.parts + 1} 个分片…`);
+async function saveImage(s, url) {
+  await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
   check(s);
   const title = (s.tab.title || "page").replace(/[\\/:*?"<>|\x00-\x1f]/g, "-").trim().slice(0, 80) || "page";
-  s.downloadId = await chrome.downloads.download({ url, filename: `LongScreenshot/${s.stamp}-${title}-part-${String(s.parts + 1).padStart(3, "0")}.png`, saveAs: false });
-  await status(s, "saving", `正在保存第 ${s.parts + 1} 个分片…`);
+  s.downloadId = await chrome.downloads.download({ url, filename: `LongScreenshot/${s.stamp}-${title}.png` });
+  await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
   const started = Date.now();
   while (Date.now() - started < 120_000) {
     check(s);
     const [item] = await chrome.downloads.search({ id: s.downloadId });
     if (!item || item.state === "interrupted") throw new Error(`下载失败：${item?.error || "记录不存在"}`);
-    if (item.state === "complete") { s.downloadId = null; s.parts++; return; }
+    if (item.state === "complete") {
+      s.result = { downloadId: item.id, filename: item.filename, width: s.outputSize.width, height: s.outputSize.height, bytes: item.fileSize };
+      s.downloadId = null; s.parts++; return;
+    }
     await delay(250);
   }
   throw new Error("下载超过两分钟，请检查浏览器下载设置。");
@@ -170,43 +187,71 @@ async function run(s) {
     s.viewport = await request(s, "content", "PREPARE");
     if (s.mode === "region") validateRegion(s, s.viewport);
     if (s.viewport.visualScale !== 1 || s.viewport.clientHeight < 64 || s.viewport.clientWidth < 64) throw new Error("请恢复触控缩放并增大浏览器窗口。");
-    let view = await warm(s);
-    let dataUrl = await capture(s, view);
-    s.offscreen = true;
-    // A previous close may have failed even after its session was released.
-    const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-    if (contexts.length) await chrome.offscreen.closeDocument();
-    await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch screenshot tiles and encode bounded PNG parts." });
-    const scale = await request(s, "offscreen", "OPEN", { region: s.region, view, dataUrl });
-    const total = pixelEdge(s.region.y + s.region.height, s.region.y, scale.scaleY);
-    if (total < 1) throw new Error("选区高度小于一个输出像素。");
-    s.stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    for (let start = 0; start < total; start += scale.partHeight) {
-      const height = Math.min(scale.partHeight, total - start);
-      await request(s, "offscreen", "PART", { start, height });
-      let y = s.region.y + start / scale.scaleY;
-      const end = Math.min(s.region.y + s.region.height, s.region.y + (start + height) / scale.scaleY);
-      while (y < end - 0.0001) {
-        let x = s.region.x;
-        let bandBottom;
-        while (x < s.region.x + s.region.width - 0.0001) {
-          if (s.frames >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
-          if (!dataUrl) { view = await scroll(s, x, y); dataUrl = await capture(s, view); }
-          if (view.height !== s.stableHeight) throw new Error("预加载后页面高度仍在变化，请等待加载完成后重试。");
-          const rect = visibleTile(s.region, view, x, y, bandBottom);
-          rect.bottom = Math.min(rect.bottom, end);
-          bandBottom = rect.bottom;
-          await request(s, "offscreen", "FRAME", { view, rect, dataUrl });
-          dataUrl = null; // No array of screenshots or completed PNGs.
-          s.frames++;
-          x = rect.right;
-          await status(s, "capturing", `正在截图 ${Math.min(99, Math.floor((y - s.region.y) / s.region.height * 100))}% · ${s.frames} 帧 · Esc 取消`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let view;
+        if (attempt) {
+          s.metrics.retries++;
+          await status(s, "loading", "布局发生变化，正在安全预加载并重新截图…");
+          view = await warm(s);
+        } else {
+          view = await scroll(s, s.region?.x || 0, s.region?.y || 0);
+          if (s.mode === "full") s.region = { x: 0, y: 0, width: view.width, height: view.height };
+          s.stableHeight = view.height;
         }
-        y = bandBottom;
+        // Reject impossible fixed sizes before the first screenshot. Device scale
+        // is checked again against the actual first bitmap (not emulated DPR).
+        const estimatedSource = s.output === "device" ? view.dpr : 1;
+        outputGeometry(s.region, view, { width: view.innerWidth * estimatedSource,
+          height: view.innerHeight * estimatedSource }, s.output);
+        let dataUrl = await capture(s, view);
+        s.offscreen = true;
+        const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+        if (contexts.length) await chrome.offscreen.closeDocument();
+        await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch frames into one bounded PNG." });
+        const scale = await request(s, "offscreen", "OPEN", { region: s.region, view, dataUrl, output: s.output });
+        s.outputSize = scale;
+        await request(s, "offscreen", "PART", { start: 0, height: scale.height });
+        let y = s.region.y;
+        while (y < s.region.y + s.region.height - 0.0001) {
+          let x = s.region.x, bandBottom;
+          while (x < s.region.x + s.region.width - 0.0001) {
+            if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
+            if (!dataUrl) {
+              view = await scroll(s, x, y);
+              if (view.height !== s.stableHeight) throw Object.assign(new Error("页面高度仍在变化，请等待加载完成后重试。"), { layout: true });
+              dataUrl = await capture(s, view);
+            }
+            const rect = visibleTile(s.region, view, x, y, bandBottom);
+            bandBottom = rect.bottom;
+            await request(s, "offscreen", "FRAME", { view, rect, dataUrl });
+            dataUrl = null;
+            s.frames++;
+            x = rect.right;
+            const done = (y - s.region.y) * s.region.width + (rect.bottom - y) * (x - s.region.x);
+            await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(done / (s.region.width * s.region.height) * 100))}% · ${s.frames} 帧`);
+          }
+          y = bandBottom;
+        }
+        await status(s, "encoding", `正在生成图片 · ${scale.width} × ${scale.height} 像素…`);
+        const encodeStart = Date.now();
+        const { url } = await request(s, "offscreen", "EXPORT");
+        s.metrics.encodeMs += Date.now() - encodeStart;
+        s.stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const saveStart = Date.now();
+        await saveImage(s, url);
+        s.metrics.saveMs += Date.now() - saveStart;
+        await request(s, "offscreen", "RELEASE", { final: true });
+        break;
+      } catch (error) {
+        if (!error.layout || attempt || s.mode !== "full" || s.cancelled) throw error;
+        if (s.offscreen) {
+          await request(s, "offscreen", "CLOSE");
+          await chrome.offscreen.closeDocument();
+          s.offscreen = false;
+        }
+        s.frames = 0;
       }
-      const { url } = await request(s, "offscreen", "EXPORT");
-      await savePart(s, url);
-      await request(s, "offscreen", "RELEASE", { final: start + height === total });
     }
     await finish(s);
   } catch (error) { await finish(s, error); }
@@ -218,7 +263,12 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
     await ready;
     const fromPopup = sender.url === chrome.runtime.getURL("popup.html");
     if (m.type === "STATUS") return lastStatus;
-    if (m.type === "START" && fromPopup) return start(m.mode);
+    if (m.type === "START" && fromPopup) return start(m.mode, m.output);
+    if (m.type === "SHOW") {
+      if (m.id !== lastStatus.id || !lastStatus.result || (!fromPopup && (sender.tab?.id !== lastStatus.tabId || sender.frameId !== 0))) throw new Error("过期的截图结果。");
+      await chrome.downloads.show(lastStatus.result.downloadId);
+      return {};
+    }
     const s = active;
     if (!s || s.id !== m.id || (!fromPopup && (sender.tab?.id !== s.tab.id || sender.frameId !== 0))) throw new Error("过期的截图任务。");
     if (m.type === "CANCEL") {

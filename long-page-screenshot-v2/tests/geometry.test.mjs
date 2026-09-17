@@ -17,10 +17,10 @@ test("selection validates all four document edges", () => {
 });
 
 for (const scale of [1, 1.25, 1.5, 2, 2.5]) {
-  test(`fractional scale ${scale}: wide document, clamped bottom, multiple parts cover every output pixel`, () => {
-    const region = { x: 73, y: 121, width: 2303, height: 19517 };
+  test(`fractional scale ${scale}: clamped bottom and absolute tile edges cover every output pixel`, () => {
+    const region = { x: 73, y: 121, width: 2303, height: 1017 };
     const viewport = { innerWidth: 1000, innerHeight: 700, clientWidth: 985, clientHeight: 685 };
-    const output = outputGeometry(region, viewport, { width: 1000 * scale, height: 700 * scale });
+    const output = outputGeometry(region, viewport, { width: 1000 * scale, height: 700 * scale }, "device");
     assert.ok(output.width * output.partHeight <= MAX_PIXELS);
     const total = pixelEdge(region.y + region.height, region.y, scale);
     let previousRow = 0;
@@ -66,4 +66,30 @@ test("limits fail explicitly for infinite growth, oversized width and changed zo
   assert.throws(() => checkHeight(5000, 20000, 700));
   assert.throws(() => outputGeometry({ x: 0, width: 20000 }, { innerWidth: 1000, innerHeight: 700 }, { width: 1000, height: 700 }));
   assert.equal(sameViewport({ dpr: 1 }, { dpr: 2 }), false);
+});
+
+for (const [mode, ratio] of [["auto", 1], ["css", 1], ["75", 0.75], ["50", 0.5], ["device", 2]]) {
+  test(`output mode ${mode} separates bitmap sampling from CSS output scale`, () => {
+    const region = { x: 0, y: 0, width: 800, height: 2000 };
+    const out = outputGeometry(region, { innerWidth: 800, innerHeight: 600 }, { width: 1600, height: 1200 }, mode);
+    assert.equal(out.width, 800 * ratio); assert.equal(out.height, 2000 * ratio);
+    const draw = drawGeometry(region, { x: 0, y: 0 }, { x: 0, y: 0, right: 800, bottom: 600 }, out, 0);
+    assert.equal(draw.sw, 1600); assert.equal(draw.sh, 1200);
+    assert.equal(draw.dw, 800 * ratio); assert.equal(draw.dh, 600 * ratio);
+  });
+}
+
+test("Auto reduces to one bounded canvas; fixed and unreadably small output fail explicitly", () => {
+  const view = { innerWidth: 900, innerHeight: 700 }, bitmap = { width: 1800, height: 1400 };
+  const region = { x: 0, y: 0, width: 900, height: 26000 };
+  const out = outputGeometry(region, view, bitmap);
+  assert.ok(out.width * out.height <= MAX_PIXELS); assert.ok(out.height <= 16384);
+  assert.throws(() => outputGeometry(region, view, bitmap, "css"), /自动/);
+  assert.throws(() => outputGeometry({ ...region, height: 1000000 }, view, bitmap), /缩小截图区域/);
+});
+
+test("Auto rounds repeatedly until the 16 MP budget is satisfied", () => {
+  const out = outputGeometry({ x: 0, y: 0, width: 1030, height: 15878 },
+    { innerWidth: 900, innerHeight: 700 }, { width: 900, height: 700 });
+  assert.ok(out.width * out.height <= MAX_PIXELS);
 });

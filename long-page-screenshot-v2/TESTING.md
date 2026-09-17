@@ -1,75 +1,74 @@
-# V2 验证记录
+# V2 本轮验证记录
 
-环境：macOS，Chrome 152.0.7977.84，Node.js 24.19.0。测试日期：2026-09-17（Asia/Shanghai）。
+2026-09-17，macOS，Chrome 152.0.7977.84，Node 24.19.0。基线为 `41e0f507c8adc1100eca074d0a8670de1cba6734`。
 
-测试浏览器使用独立临时配置；加载的就是正式 manifest，没有增加主机权限。通过 Chrome 的 `Extensions.triggerAction` 授予 `activeTab`，实际截图使用扩展的 `captureVisibleTab`，实际拼图和下载使用 offscreen／downloads。浏览器自动化只负责驱动与断言，不替换截图引擎。测试图片、浏览器配置与下载均留在系统临时目录，不在仓库内。
+所有 Chrome 测试使用独立临时 profile 和下载目录，加载正式 manifest，经 `Extensions.triggerAction` 授予 activeTab。截图、离屏画布和下载均走真实扩展 API；Playwright 只负责驱动和断言。测试文件不进入仓库。未访问 CSDN，V0.1 未修改。
 
-## 自动化结果
+## 性能对比
 
-| 检查 | 结果 |
+同一确定性彩色逐行 fixture，CSS 1500×10337、视口 900×700、100% 缩放，逐行检查 x=0/800/1499，验证横向拼接、纵向拼接、最终底部，无遗漏、重复或空白。
+
+| 指标 | 基线双遍／分片 | 本轮单遍／单 PNG |
+| --- | ---: | ---: |
+| 总耗时 | 26,357 ms | 17,512 ms |
+| captureVisibleTab 次数 | 32 | 30 |
+| scroll/settle 次数 | 48 | 30 |
+| PNG 编码累计 | 265 ms | 220 ms |
+| 保存累计 | 529 ms | 273 ms |
+| 最终 PNG 数量 | 2 | 1 |
+| 输出尺寸合计 | 1500×10337 | 1500×10337 |
+
+总耗时降低约 **33.6%**，settle 减少 37.5%。截图间隔仍至少 550 ms。基线复制到临时目录后仅增加计时和计数；编码时间只累计 EXPORT，保存时间只累计下载等待，不把两次编码之间的截图时间算入编码。当前代码直接在结果 `metrics` 返回 captures、settles、encodeMs、saveMs、retries、totalMs。数据是本机单次确定性比较，不是所有网站的速度保证。
+
+## 自动化覆盖
+
+- Node：23/23 通过。保留几何/DPR/边界、offscreen 解码／编码失败、串行清理、过期消息测试；新增五档比例、源像素与输出像素分离、Auto 预算取整，以及首次启动 closeDocument 拒绝后仍可 STATUS／START 并完成新任务的测试。
+- 基础 Chrome：1500×10337 单 PNG 逐行检查、实际点选跨屏选区、125% 原生缩放、模拟 DPR 与实际 bitmap 不一致、动态高度 1800→2800、Esc 取消、并发拒绝、过期消息、worker 强制终止及下载拒绝恢复。
+- 输出／UI Chrome：800×1800 CSS 选区五档输出分别 800×1800、800×1800、600×1350、400×900、800×1800（本组原生 1×）；逐像素恒定蓝通道证明进度面板、空白和遮挡没有进入输出。真实弹窗关闭后页面面板仍可见；页面取消及完成态手动关闭有效。
+- 实际路径：对比 PNG 下载记录的 filename 与面板文本，实际路径为测试下载目录下 Chrome 返回的文件名，并非建议的 LongScreenshot 路径。Node 测试另用 `/custom/chosen/result.png` 验证自选目录；页面按钮用 spy 验证传入正确下载 ID，原生 Retina 组另外调用真实 downloads.show API。
+- 超长输出：CSS 1500×26000，100% 在首帧前明确失败（captures=0）；Auto 输出一张 945×16384 PNG，检查预算、每行无空白和底部颜色。高度 1,000,000 CSS px 的极端页面 Auto 在首帧前建议缩小区域。
+
+## 复杂页面与原生 Retina
+
+- `tests/fixtures/test-complex-page.html`：整页单 PNG 900×13510，18 张延迟图片和底部色标完整；定时增高触发一次安全重试（最终 20 帧，实际截图 23 次、settle 44 次，总耗时 23,934 ms）。逐行检查排除固定顶栏。
+- 正文选区通过实际两角点选，验证连续绿色边框及排除侧栏；选区后增高、缩短、截图等待期间增高均明确失败并恢复。
+- 成功、失败、取消均检查原滚动位置、fixed/sticky 内联样式和优先级；验证 live offscreen 时取消、过期取消不影响新任务、一次关闭失败后下个任务完成并清理。
+- 原生设备 2×：500×1600 CSS 区域，设备模式输出 1000×3200；Auto／CSS 100% 为 500×1600，75% 为 375×1200，50% 为 250×800，各输出逐行检查无空白。
+- 真实 `chrome.downloads.show` 调用成功；没有要求用户改变 Chrome 下载偏好。
+
+## 外部页面
+
+| 页面 | 本轮结果 |
 | --- | --- |
-| Node 几何与离屏生命周期单元测试 | 15/15 通过 |
-| 导出释放画布、末片释放会话、Blob 撤销 | 通过 |
-| 旧拼图消息、串行导出／关闭／新会话 | 通过，旧消息不影响新任务 |
-| 解码失败、编码失败、文档 pagehide | 通过，资源释放且旧会话不再接受分片 |
-| 1、1.25、1.5、2、2.5 比例的绝对边界舍入 | 通过，无累计缺行 |
-| 1500×10337 测试页整页输出 | 通过，2 个分片，每行检查 3 个横向位置 |
-| 横向视口拼接、纵向分片、最后不足一屏 | 通过，无遗漏、重复或空白行 |
-| 点选左上角 → 滚动 → 点选右下角 → 开始 | 通过，输出 640×2156，逐行颜色匹配所选区域 |
-| 浏览器原生缩放 125% | 通过，640×2160 CSS 选区输出 800×2700，无空白行 |
-| 原生 2× backing scale | 通过，500×1600 CSS 选区输出 1000×3200，无空白行 |
-| 仅 CDP 模拟 DPR 与截图实际比例不同 | 验证按实际 PNG／视口比例处理，不盲乘 DPR |
-| 预滚动触发高度从 1800 增长到 2800 | 通过，输出包含最终 2800 像素高度 |
-| 原始水平／垂直滚动与固定元素样式恢复 | 通过 |
-| Esc 取消、并发启动拒绝、过期取消消息、新任务 | 通过 |
-| 强制终止 service worker | 通过，重启后任务标记中断，页面恢复、offscreen 关闭 |
-| 浏览器拒绝下载 | 通过，显示失败并恢复页面、清理 offscreen |
+| https://ixyzero.com/blog/archives/5949.html | Chrome 单次导航等待 DOMContentLoaded 60 秒超时，未进入截图；没有重试 |
+| https://ixyzero.com/blog/archives/5483.html | 同站网络未正常响应，按任务要求不反复等待，未继续访问 |
 
-画布面积上限通过几何测试和实现检查验证；未声称测得浏览器总 RSS 的固定上限。GPU、编码器及网页自身仍有独立内存开销。
+因此本轮不声称外部两页截图验收通过，也不沿用旧版本的通过记录。本地 Node、基础 Chrome、输出/UI、复杂页面和原生 Retina 五组均通过；矩阵脚本最终因外部导航超时退出 1，而非扩展截图断言失败。
 
-## 指定网页验收
-
-| 页面／模式 | 结果与检查 |
-| --- | --- |
-| [5949](https://ixyzero.com/blog/archives/5949.html) 整页 | 通过：900×6294，9 帧、1 PNG；目视检查顶部正文及底部评论表单、页脚完整 |
-| [5483](https://ixyzero.com/blog/archives/5483.html) 整页 | 通过：总计 900×26146，39 帧；4 PNG 高度分别为 8192、8192、8192、1570；目视检查第一处分片接缝与最终页脚 |
-| 本地复杂页整页 | 通过：900×13510，20 帧、2 PNG；18 张延迟图片全部加载、定时插入内容及底部色标齐全 |
-| 本地复杂页正文选区 | 通过：628×13034，19 帧、2 PNG；实际两次点选跨屏操作，逐行验证绿色正文边框，两侧区域排除 |
-| 本地复杂页固定／sticky／恢复 | 通过：红色固定顶栏隐藏，侧栏转为普通流，负 z-index 背景和 4px 装饰保留；成功、失败、取消后内联值与优先级恢复 |
-| 本地复杂页选区失效 | 通过：选择后增高（边界仍在页面内）、缩短后越界、选区预滚动期间增高均明确失败并恢复 |
-| 本地复杂页取消和下一次截图 | 通过：离屏文档已创建后按 Esc，页面／offscreen 清理，新任务成功导出，旧取消消息被拒绝 |
-| 离屏文档关闭偶发失败 | 通过：测试注入一次 closeDocument 拒绝，下一任务清理残留文档后成功导出 |
-
-CSDN 外部场景已从验收集合中移除，以本地复杂页面替代。原环境的网络连接限制不视为实现失败，本次未重试该站点。
-
-完整输出的所有文本未逐字核对。浏览器截图及选区界面已做视觉检查；代码并不包含针对上述站点的分支。
-
-## 复现
+## 完整矩阵命令
 
 ```sh
 node --test long-page-screenshot-v2/tests/*.test.mjs
 node long-page-screenshot-v2/tests/browser.mjs
+OUTPUT_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 COMPLEX_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
-EXTRA_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 SITE_URL=https://ixyzero.com/blog/archives/5949.html node long-page-screenshot-v2/tests/browser.mjs
 SITE_URL=https://ixyzero.com/blog/archives/5483.html node long-page-screenshot-v2/tests/browser.mjs
 ```
 
-测试脚本需要测试环境已有 Playwright 和 pngjs；可用 `NODE_PATH` 指向其包目录、`CHROME_EXECUTABLE` 指定新版 Chrome 路径。`EXTRA_ONLY=1` 仅执行取消、懒加载、中断和失败恢复检查。`HEADED=1` 显示测试浏览器。脚本会打印临时产物目录。
+测试环境需要 Playwright、pngjs，可用 `NODE_PATH` 指定其包目录，`CHROME_EXECUTABLE` 指定支持扩展调试协议的新 Chrome 路径。`HEADED=1` 可显示测试窗口；`EXTRA_ONLY=1` 可仅复验取消和异常恢复。脚本打印临时产物目录。
 
-## 本地手动复现
+## 手动复现
 
-从仓库根目录执行 `python3 -m http.server 8000 --bind 127.0.0.1`，打开 [本地复杂页](http://127.0.0.1:8000/tests/fixtures/test-complex-page.html)。该文件所有文本和 SVG 均在本地生成，无外部依赖。
+从仓库根目录运行 `python3 -m http.server 8000 --bind 127.0.0.1`，打开 `http://127.0.0.1:8000/tests/fixtures/test-complex-page.html`。
 
-1. 打开页面后立即截取整页，检查 2 秒后插入的浅绿面板、18 张蓝色图片和最底部 `DOCUMENT END`，并检查 PNG 分片连接处。
-2. 等待定时增高结束，沿绿色边框点选正文左上角，滚动后点选右下角；确认导出排除黄色侧栏及页脚，保留 `ARTICLE START` / `ARTICLE END`。
-3. 选择界面打开后点击页面的增高按钮，再提交原选区。扩展应失败；重新打开扩展弹窗查看具体原因，等布局稳定后重新选择。
-4. 截图时按 Esc，或用弹窗取消；检查原始滚动位置、顶栏透明度及 sticky 侧栏恢复，再次截图应成功。
-5. 页面默认启用平滑滚动和 proximity scroll snap；截图期间自动关闭，结束后恢复。
-
-复杂页面自动化通过实际 Chrome 扩展截图链路验证输出尺寸、每行边框和底部像素；原有彩色逐行页面继续覆盖精确拼接、横向溢出、缩放、工作线程终止和下载被拒绝。
+1. 打开后立即整页截图，检查定时插入面板、18 张蓝色延迟图片和 DOCUMENT END；输出应为一张 PNG。
+2. 等布局稳定后沿绿色正文边框跨屏点选，检查选区排除侧栏和页脚、边框连续。
+3. 选区界面打开后用页面按钮增高，再提交旧边界，应明确失败并恢复。
+4. 截图时按面板取消或 Esc，检查原滚动、fixed/sticky 内联值恢复，随后新任务能成功。
+5. Chrome 开启“下载前询问每个文件的保存位置”，选择不同目录／文件名，核对完成面板与 Finder。自动化没有驱动 macOS 原生保存对话框；下载选项不设置 saveAs，保留浏览器偏好，结果始终以完成后的 DownloadItem 为准。
 
 ## 验证边界
 
-固定／sticky 的筛选是基于几何和样式的启发式，不保证识别所有遮挡；特别大的浮层、微小固定装饰可能保留并重复。选区模式采取保守策略：选择之后文档尺寸变化即停止，即使新增内容位于选区之外。相同文档尺寸下的内部换位、同尺寸异步内容替换、视频和 Canvas 动画仍不能保证一致。未覆盖 Shadow DOM／iframe 内部、独立滚动容器、无限信息流；未进行浏览器总 RSS 上限测量。
+没有测量浏览器总 RSS，仅验证画布尺寸预算及资源释放。fixed/sticky 是既有启发式，滚动后才切换 class/style 的吸顶元素不在本轮范围。未支持虚拟列表、无限 feed、iframe 内滚动、视频时序一致性、同尺寸异步内容替换或同尺寸内部换位。真实保存路径和 downloads.show API 已自动化覆盖；不声称自动化检查了 Finder 窗口的视觉状态或原生保存对话框。

@@ -19,7 +19,7 @@ for (const mode of ["full", "region"]) $(mode).onclick = async () => {
   startError = "";
   $("full").disabled = $("region").disabled = true;
   try {
-    const result = await send({ type: "START", mode });
+    const result = await send({ type: "START", mode, output: $("output").value });
     if (!result.ok) throw new Error(result.error);
     window.close();
   } catch (error) { startError = error.message; $("status").textContent = startError; }

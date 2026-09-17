@@ -41,14 +41,14 @@ try {
   const message = value => control.evaluate(value => chrome.runtime.sendMessage({ target: "background", ...value }), value);
   const waitFor = async predicate => {
     const start = Date.now();
-    while (Date.now() - start < 900_000) {
+    while (Date.now() - start < 180_000) {
       const state = await message({ type: "STATUS" });
       if (predicate(state)) return state;
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     throw new Error("Timed out waiting for capture state");
   };
-  const capture = async mode => {
+  const capture = async (mode, output = "auto") => {
     await page.bringToFront();
     const { targetInfos: tabs } = await browserCDP.send("Target.getTargets", { filter: [{ type: "tab" }] });
     const targetInfo = tabs.find(tab => tab.type === "tab" && tab.url === page.url());
@@ -64,7 +64,7 @@ try {
       }
     }
     await controlCDP.detach();
-    const result = await message({ type: "START", mode });
+    const result = await message({ type: "START", mode, output });
     assert.equal(result.ok, true, JSON.stringify(result));
     return result;
   };
@@ -77,10 +77,65 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.COMPLEX_ONLY) {
+  if (process.env.OUTPUT_ONLY) {
+    const panel = page.locator("#long-screenshot-v2-progress");
+    for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5], ["device", 1]]) {
+      const job = await capture("region", output);
+      await selectRegion(job, { left: 0, top: 0, right: 800, bottom: 1800 });
+      await waitFor(s => s.state === "loading");
+      await panel.waitFor({ state: "visible" });
+      assert.equal(await panel.locator("#cancel").isVisible(), true);
+      const result = await waitFor(s => !s.busy);
+      assert.equal(result.state, "complete", JSON.stringify(result));
+      assert.equal(result.parts, 1);
+      const png = PNG.sync.read(await readFile(result.result.filename));
+      assert.equal(png.width, 800 * ratio); assert.equal(png.height, 1800 * ratio);
+      // Constant blue channel across the full image catches status-panel contamination,
+      // blank seams and duplicated overlays, including the bottom-right panel area.
+      for (let i = 2; i < png.data.length; i += 4) assert.equal(png.data[i], 97);
+      assert.ok((await panel.locator("section").innerText()).includes(result.result.filename));
+      assert.ok((await panel.locator("section").innerText()).includes(`${png.width} × ${png.height}`));
+      assert.equal(await panel.locator("#show").isVisible(), true);
+      if (output === "auto") await page.screenshot({ path: join(root, "completed-panel.png") });
+      await worker.evaluate(() => { globalThis.shownDownload = null; chrome.downloads.show = id => { globalThis.shownDownload = id; }; });
+      await panel.locator("#show").click();
+      assert.equal(await worker.evaluate(() => globalThis.shownDownload), result.result.downloadId);
+      console.log("PASS output/UI/path/show", output, png.width, png.height);
+    }
+    await capture("full");
+    await waitFor(s => s.state === "loading");
+    await panel.locator("#cancel").click();
+    assert.equal((await waitFor(s => !s.busy)).state, "cancelled");
+    assert.ok((await panel.locator("section").innerText()).includes("取消"));
+    await panel.locator("#close").click();
+    assert.equal(await panel.count(), 0);
+    console.log("PASS page-panel cancel and persistent completion close");
+    await page.evaluate(() => { document.querySelector("canvas").style.width = "1500px"; document.querySelector("canvas").style.height = "26000px"; });
+    await capture("full", "css");
+    const oversized = await waitFor(s => !s.busy);
+    assert.equal(oversized.state, "failed"); assert.match(oversized.message, /自动/);
+    assert.equal(oversized.metrics.captures, 0);
+    await capture("full", "auto");
+    const reduced = await waitFor(s => !s.busy);
+    assert.equal(reduced.state, "complete", JSON.stringify(reduced));
+    assert.equal(reduced.parts, 1);
+    const reducedPNG = PNG.sync.read(await readFile(reduced.result.filename));
+    assert.ok(reducedPNG.width * reducedPNG.height <= 16000000);
+    assert.equal(reducedPNG.height, 16384);
+    for (let y = 0; y < reducedPNG.height; y++) assert.equal(reducedPNG.data[(y * reducedPNG.width + 10) * 4 + 2], 97);
+    const bottom = ((reducedPNG.height - 1) * reducedPNG.width + 10) * 4;
+    assert.ok(Math.abs(reducedPNG.data[bottom] - (10336 % 251)) <= 2);
+    assert.equal(reducedPNG.data[bottom + 1], Math.floor(10336 / 251));
+    await page.evaluate(() => { document.querySelector("canvas").style.height = "1000000px"; });
+    await capture("full");
+    const extreme = await waitFor(s => !s.busy);
+    assert.equal(extreme.state, "failed"); assert.match(extreme.message, /缩小截图区域/);
+    assert.equal(extreme.metrics.captures, 0);
+    console.log("PASS Auto reduction, single PNG, bottom, fixed-size and extreme preflight rejection");
+  } else if (process.env.COMPLEX_ONLY) {
     await testComplexPage({ page, worker, message, waitFor, capture, selectRegion, root, PNG });
   } else if (process.env.NATIVE_DPR) {
-    const retina = await capture("region");
+    const retina = await capture("region", "device");
     await selectRegion(retina, { left: 200, top: 100, right: 700, bottom: 1700 });
     const result = await waitFor(s => !s.busy);
     assert.equal(result.state, "complete", JSON.stringify(result));
@@ -90,6 +145,18 @@ try {
     assert.equal(png.height, 1600 * Number(process.env.NATIVE_DPR));
     for (let y = 0; y < png.height; y++) assert.equal(png.data[(y * png.width + 400) * 4 + 2], 97);
     console.log("PASS native device scale", process.env.NATIVE_DPR, png.width, png.height);
+    assert.equal((await message({ type: "SHOW", id: result.id })).ok, true);
+    console.log("PASS real Chrome downloads.show API");
+    for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5]]) {
+      const job = await capture("region", output);
+      await selectRegion(job, { left: 200, top: 100, right: 700, bottom: 1700 });
+      const done = await waitFor(s => !s.busy);
+      assert.equal(done.state, "complete", JSON.stringify(done));
+      const image = PNG.sync.read(await readFile(done.result.filename));
+      assert.equal(image.width, 500 * ratio); assert.equal(image.height, 1600 * ratio);
+      for (let y = 0; y < image.height; y++) assert.equal(image.data[(y * image.width + 10) * 4 + 2], 97);
+      console.log("PASS native Retina CSS output", output, image.width, image.height);
+    }
   } else if (process.env.SITE_URL) {
     await page.screenshot({ path: join(root, "page-before.png") });
     console.log("PAGE", await page.title(), await page.evaluate(() => ({ width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight })));
@@ -116,7 +183,7 @@ try {
   await capture("full");
   const full = await waitFor(s => !s.busy);
   assert.equal(full.state, "complete", JSON.stringify(full));
-  assert.equal(full.parts, 2);
+  assert.equal(full.parts, 1); console.log("FAST", JSON.stringify(full));
   const items = await worker.evaluate(() => chrome.downloads.search({}));
   // Playwright may assign GUID filenames, so order by download initiation.
   const files = items.sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -133,7 +200,7 @@ try {
   }
   assert.equal(row, 10337);
   assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.getElementById("fixed").style.visibility]), [123, 321, ""]);
-  console.log("PASS full: exact rows across horizontal tiles and PNG parts, bottom and page restoration");
+  console.log("PASS full: exact rows across horizontal/vertical tiles in one PNG, bottom and page restoration");
 
   await capture("region");
   await page.screenshot({ path: join(root, "selection.png") });
@@ -159,7 +226,7 @@ try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     await chrome.tabs.setZoom(tab.id, 1.25);
   });
-  const zoomJob = await capture("region");
+  const zoomJob = await capture("region", "device");
   await selectRegion(zoomJob, { left: 200, top: 100, right: 840, bottom: 2260 });
   const zoomResult = await waitFor(s => !s.busy);
   assert.equal(zoomResult.state, "complete", JSON.stringify(zoomResult));

@@ -2,7 +2,39 @@
   if (window.__longScreenshotV2) return;
   window.__longScreenshotV2 = true;
   let session;
+  let progress;
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  function showProgress(status) {
+    if (!progress || progress.id !== status.id) return;
+    const { host, shadow } = progress;
+    host.style.setProperty("visibility", "visible", "important");
+    shadow.querySelector("p").textContent = status.message;
+    const result = status.result;
+    shadow.querySelector("pre").textContent = result
+      ? `${result.filename.split(/[\\/]/).pop()}\n${result.filename}\n${result.width} × ${result.height} 像素${result.bytes >= 0 ? ` · ${(result.bytes / 1048576).toFixed(2)} MB` : ""}` : "";
+    shadow.querySelector("#cancel").hidden = !status.busy;
+    shadow.querySelector("#close").hidden = !!status.busy;
+    shadow.querySelector("#show").hidden = !result;
+  }
+
+  function progressPanel(id) {
+    progress?.host.remove();
+    const host = document.createElement("div");
+    host.id = "long-screenshot-v2-progress";
+    host.style.cssText = "all:initial!important;position:fixed!important;right:16px!important;bottom:16px!important;z-index:2147483647!important;";
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `<style>:host{color-scheme:light}section{width:310px;max-height:45vh;overflow:auto;padding:16px;background:#182231;color:white;border-radius:12px;box-shadow:0 5px 25px #0006;font:14px/1.5 system-ui}p{margin:0 0 8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 system-ui}button{padding:7px;cursor:pointer}[hidden]{display:none}</style><section role="status" aria-live="polite"><p></p><pre></pre><button id="cancel">取消</button><button id="show" hidden>在 Finder 中显示</button><button id="close" hidden>关闭</button></section>`;
+    progress = { id, host, shadow };
+    shadow.querySelector("#cancel").onclick = cancel;
+    shadow.querySelector("#close").onclick = () => host.remove();
+    shadow.querySelector("#show").onclick = async () => {
+      const response = await chrome.runtime.sendMessage({ target: "background", type: "SHOW", id });
+      if (!response?.ok) shadow.querySelector("p").textContent = response?.error || "无法显示文件。";
+    };
+    document.documentElement.append(host);
+    showProgress({ id, busy: true, message: "正在准备…" });
+  }
 
   function measure() {
     const root = document.documentElement;
@@ -52,7 +84,7 @@
       event.preventDefault();
     }
   }
-  function onInput(event) { if (session?.capturing) { event.preventDefault(); event.stopImmediatePropagation(); } }
+  function onInput(event) { if (event.composedPath().includes(progress?.host)) return; if (session?.capturing) { event.preventDefault(); event.stopImmediatePropagation(); } }
 
   function begin(id) {
     if (session) throw new Error("页面已有截图任务。");
@@ -60,11 +92,12 @@
     session.watchdog = setInterval(() => {
       if (session && Date.now() - session.touched > 30_000) restore();
     }, 2000);
+    progressPanel(id);
     document.addEventListener("keydown", onKey, true);
   }
 
   function adjustElement(element, s) {
-    if (!(element instanceof HTMLElement) || s.changed.has(element) || element === s.host) return;
+    if (!(element instanceof HTMLElement) || s.changed.has(element) || element === s.host || element === progress?.host) return;
     const style = getComputedStyle(element);
     const position = style.position;
     if (position !== "fixed" && position !== "sticky") return;
@@ -191,7 +224,14 @@
       if (m.type === "BEGIN") { begin(m.id); if (m.mode === "region") select(session); return measure(); }
       // Idempotent cleanup must not clean up a newer session.
       if (m.type === "FINISH") { if (session?.id === m.id) restore(); return {}; }
+      if (m.type === "PROGRESS") { showProgress(m.status); return {}; }
       const s = requireSession(m.id);
+      if (m.type === "HIDE_UI") {
+        progress?.host.style.setProperty("visibility", "hidden", "important");
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return measure();
+      }
+      if (m.type === "SHOW_UI") { if (progress) progress.host.style.setProperty("visibility", "visible", "important"); return {}; }
       if (m.type === "TOUCH") return {};
       if (m.type === "PREPARE") { prepare(s); return measure(); }
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y);

@@ -12,15 +12,27 @@ export function regionFromEdges({ left, top, right, bottom }, page) {
 // Round absolute boundaries, never the height of each successive tile.
 export const pixelEdge = (css, origin, scale) => Math.round((css - origin) * scale);
 
-export function outputGeometry(region, view, bitmap) {
-  const scaleX = bitmap.width / view.innerWidth;
-  const scaleY = bitmap.height / view.innerHeight;
-  const width = pixelEdge(region.x + region.width, region.x, scaleX);
-  if (width < 1 || width > MAX_DIMENSION || Math.abs(scaleX - scaleY) > 0.02) {
-    throw new Error("截图尺寸不受支持，请缩小页面缩放或选区宽度。");
+export function outputGeometry(region, view, bitmap, mode = "auto") {
+  const sourceX = bitmap.width / view.innerWidth;
+  const sourceY = bitmap.height / view.innerHeight;
+  if (![region.width, region.height, sourceX, sourceY].every(n => Number.isFinite(n) && n > 0) || Math.abs(sourceX - sourceY) > 0.02) {
+    throw new Error("截图尺寸不受支持，请缩小选区。");
   }
-  return { scaleX, scaleY, width,
-    partHeight: Math.min(8192, Math.floor(MAX_PIXELS / width)) };
+  const safe = Math.min(MAX_DIMENSION / region.width, MAX_DIMENSION / region.height,
+    Math.sqrt(MAX_PIXELS / (region.width * region.height)));
+  const requested = { auto: Math.min(1, sourceX, sourceY, safe), css: 1, "75": 0.75, "50": 0.5, device: sourceX }[mode];
+  if (!requested || (mode === "auto" && requested < 0.25)) throw new Error("页面过长，无法生成清晰的单图，请缩小截图区域。");
+  let ratio = requested;
+  let width = Math.round(region.width * ratio), height = Math.round(region.height * ratio);
+  // Rounding must not push an Auto canvas beyond its hard budget.
+  while (mode === "auto" && width * height > MAX_PIXELS) {
+    ratio *= Math.sqrt(MAX_PIXELS / (width * height)) * 0.9999;
+    width = Math.round(region.width * ratio); height = Math.round(region.height * ratio);
+  }
+  if (width < 1 || height < 1 || width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS) {
+    throw new Error("此输出尺寸无法安全生成单图，请改用自动、更低比例或缩小区域。");
+  }
+  return { sourceX, sourceY, scaleX: ratio, scaleY: ratio, width, height, partHeight: height };
 }
 
 export function drawGeometry(region, view, rect, scale, partStart) {
@@ -29,10 +41,10 @@ export function drawGeometry(region, view, rect, scale, partStart) {
   const y0 = pixelEdge(rect.y, region.y, scale.scaleY);
   const y1 = pixelEdge(rect.bottom, region.y, scale.scaleY);
   return {
-    sx: (rect.x - view.x) * scale.scaleX,
-    sy: (rect.y - view.y) * scale.scaleY,
-    sw: (rect.right - rect.x) * scale.scaleX,
-    sh: (rect.bottom - rect.y) * scale.scaleY,
+    sx: (rect.x - view.x) * (scale.sourceX ?? scale.scaleX),
+    sy: (rect.y - view.y) * (scale.sourceY ?? scale.scaleY),
+    sw: (rect.right - rect.x) * (scale.sourceX ?? scale.scaleX),
+    sh: (rect.bottom - rect.y) * (scale.sourceY ?? scale.scaleY),
     dx: x0, dy: y0 - partStart, dw: x1 - x0, dh: y1 - y0
   };
 }

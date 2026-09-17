@@ -3,7 +3,7 @@
   "name": "Long Page Screenshot V2",
   "version": "2.0.0",
   "minimum_chrome_version": "116",
-  "description": "可靠的整页与自选区域长截图，本地处理，分片保存超长页面。",
+  "description": "可靠的整页与自选区域长截图，本地处理，单图保存并显示实际下载位置。",
   "permissions": ["activeTab", "scripting", "offscreen", "downloads", "storage"],
   "action": { "default_popup": "popup.html", "default_title": "长截图 V2" },
   "background": { "service_worker": "background.js", "type": "module" }

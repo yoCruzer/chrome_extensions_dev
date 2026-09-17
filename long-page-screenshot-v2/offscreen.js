@@ -46,7 +46,7 @@ async function handle(m) {
     if (session) throw new Error("拼图任务仍在运行。");
     const bitmap = await decode(m.dataUrl);
     try {
-      const scale = outputGeometry(m.region, m.view, bitmap);
+      const scale = outputGeometry(m.region, m.view, bitmap, m.output);
       session = { id: m.id, region: m.region, scale, bitmapWidth: bitmap.width, bitmapHeight: bitmap.height };
       return scale;
     } finally { bitmap.close(); }
