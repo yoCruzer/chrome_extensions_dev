@@ -88,3 +88,13 @@ NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。新增动态 fixture：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，以完整参考像素验证动态 banner、一次 resize 及重复 reflow。`test-csdn-like-page.html` 和 `test-chat-like-page.html` 分别复现 scrollbar／动态文章和 flex/grid 聊天布局中的两类误报。详见 [TESTING.md](TESTING.md)。
 
 API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Offscreen](https://developer.chrome.com/docs/extensions/reference/api/offscreen)、[Downloads](https://developer.chrome.com/docs/extensions/reference/api/downloads)。
+
+### Full Page 诊断
+
+截图结束（成功或失败）后，页面状态面板可点击 **复制诊断信息**，无需 DevTools。JSON 复用结束状态，包含 attempt、metrics、高度/扩展/重启统计及 `diagnostics.fullProof`：
+
+- `trigger`：`MUTATION_INVALIDATION`、`WITNESS_MOVED`、`WITNESS_REMOVED`；文档缩短另标为 `DOCUMENT_SHRANK`。成功且当前 attempt 未失败时为 `null`。原 `reasonCode: FULL_REFLOW` 和重启行为不变。
+- `counters`：从首次 FULL_RESET 起累计跨 attempt 的 mutation 记录总数、忽略数、命中 captured prefix 数，以及 fullProof 验证调用次数（包括 invalid 快速失败）。每条 mutation 只计一次；一条记录可生成多个原因事件。
+- `trace`：最多保留最近 150 条，跨重启保留；每条包含 attempt、scrollY、documentHeight、viewportHeight、proofEnd、witnessCount 和已提交 frameCount。记录 attempt 开始、witness 建立、mutation 命中、FULL_REFLOW 及结束。验证失败另外包含几何 before/current/delta 和 connected。
+
+为避免 DOM 属性包含账号或凭据，descriptor 的 `id` / `className` 使用加盐匿名标签（class 输入最多 120 字符），同一页面注入期间可关联；不导出原始值或 data-testid。不同页面报告的匿名标签不能直接对照。JSON 不包含 URL、正文、HTML、图片、下载路径、Cookie 或页面 storage；自由文本错误使用固定安全提示，详细分类以 reasonCode/trigger 为准。此改动只做诊断，不改变 mutation 条件、0.5px witness 阈值、截图规划或重启策略。

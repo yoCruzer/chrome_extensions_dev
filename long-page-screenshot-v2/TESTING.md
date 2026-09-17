@@ -96,3 +96,17 @@ Phase A 扩展验证 `screenshot-v2-test-KW1Ujd`：容器高度 620→500px 后�
 仅修改 V2 的 runtime、README/TESTING 和 V2 tests/fixtures。没有 V0.1、SmartWebCapture 或其它扩展修改；没有新增站点 selector、权限、框架或构建系统，临时 profile/PNG/日志均未入库。
 
 剩余边界：主目标是普通垂直内部容器；不支持虚拟列表、iframe 内滚动、任意二维嵌套滚动和无限 feed。Full Page 的几何见证/DOM 观察不是像素冻结，Canvas/视频与未观察的绘制变化仍不能保证跨帧一致性；Auto 多次扩展缩放可能降低已有内容清晰度，扩展时短暂需要双画布内存。底部稳定是有界时间判定，不承诺捕获稳定窗口之后才出现的内容。未访问真实 CSDN/ChatGPT，本报告仅证明本地确定性 fixture 与回归矩阵通过。
+
+## Diagnostic-only Full Page trace（2026-09-17）
+
+基线为最新 origin/main `039db09081850417764d85ebd6e503e9875536d7`。仅新增诊断、结束面板复制按钮及测试/说明；未修改截图算法、mutation 条件、0.5px threshold 或两次 attempt 策略。planner 的缩短分支只增加 `DOCUMENT_SHRANK` 错误元数据。
+
+定向 Node **11/11**：`diagnostics.test.mjs`（6）、`adaptive.test.mjs`（2）、`background.test.mjs`（3）。覆盖 150 条 trace 上限/跨 attempt、格式化 JSON/敏感字段排除、mutation 计数及四种原因、witness moved/removed/unchanged/阈值边界；既有增长预算、重启错误语义和 worker 结束状态保持通过。
+
+Chrome 152.0.7977.84，`DIAGNOSTICS_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs`，仅运行两个场景：
+
+- 成功：4 帧、零重启，900×2400 PNG 全 RGBA 等于参考图；trigger=null，mutation 8/ignored 8/captured-prefix 0，验证调用 32 次。
+- 两次顶部插入：attempt=2、一次重启、FULL_REFLOW/MUTATION_INVALIDATION，无 PNG；两个 attempt 的 mutation 原因及最终触发均保留，mutation 6/ignored 4/captured-prefix 2，验证调用 17 次。
+- 两种结束状态都点击真实「复制诊断信息」按钮，再从 Chrome clipboard 读回并解析、与结束 status 对照；复制时没有预授予 clipboard-write 权限。末条 frameCount 与最终状态一致，offscreen 已清理。
+
+首次运行因测试提前授予 clipboard-read 导致写入失败，改为点击成功后才授权读取用于断言，重新运行此 smoke 通过。生产 manifest/权限无修改。日志：`/tmp/full-diagnostics-smoke.log`；成功 smoke 临时产物目录：`screenshot-v2-test-bXZOvK`。未运行重型完整矩阵，也未把本地 fixture 结果当作真实 GitHub/CSDN 实站结论。

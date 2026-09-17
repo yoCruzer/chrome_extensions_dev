@@ -37,11 +37,12 @@ async function status(s, state, message) {
 
 async function request(s, target, type, payload = {}) {
   check(s);
-  const message = { target, type, id: s.id, ...payload };
+  const message = { target, type, id: s.id, ...(s.mode === "full" && target === "content" ? { diagnosticContext: { attempt: s.attempt, frames: s.frames } } : {}), ...payload };
   const response = target === "content"
     ? await chrome.tabs.sendMessage(s.tab.id, message, { frameId: 0 })
     : await chrome.runtime.sendMessage(message);
   check(s);
+  if (response?.fullProof) s.fullProofDiagnostics = response.fullProof;
   if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout, reasonCode: response?.reasonCode, diagnostics: response?.diagnostics });
   if (s.mode === "region" && s.environment && target === "content" && ["MEASURE", "SCROLL"].includes(type)) {
     response.tabZoom = await chrome.tabs.getZoom(s.tab.id);
@@ -55,14 +56,15 @@ async function finish(s, error) {
   s.finishing = true;
   clearInterval(s.heartbeat);
   if (s.downloadId) await chrome.downloads.cancel(s.downloadId).catch(() => {});
-  await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "FINISH", id: s.id }, { frameId: 0 }).catch(() => {});
+  const finished = await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "FINISH", id: s.id, diagnosticContext: { attempt: s.attempt, frames: s.frames } }, { frameId: 0 }).catch(() => {});
+  if (finished?.fullProof) s.fullProofDiagnostics = finished.fullProof;
   if (s.offscreen) {
     await chrome.runtime.sendMessage({ target: "offscreen", type: "CLOSE", id: s.id }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
   }
   lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
     metrics: { ...s.metrics, totalMs: Date.now() - s.started },
-    ...(s.mode === "full" ? { reasonCode: error?.reasonCode, diagnostics: { ...s.full, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
+    ...(s.mode === "full" ? { attempt: s.attempt || 1, reasonCode: error?.reasonCode, diagnostics: { ...s.full, fullProof: s.fullProofDiagnostics ? { ...s.fullProofDiagnostics, trigger: error?.fullProofTrigger || s.fullProofDiagnostics.trigger } : null, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
     ...(s.mode === "region" ? { reasonCode: error ? error.reasonCode || "CAPTURE_FAILED" : undefined,
       attempt: s.attempt || 1, diagnostics: { ...s.diagnostics, ...error?.diagnostics } } : {}),
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",

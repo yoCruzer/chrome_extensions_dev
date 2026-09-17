@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testDiagnostics } from "./diagnostics.mjs";
 import { testAdaptive } from "./adaptive.mjs";
 import { testNested } from "./nested.mjs";
 import { testReliability } from "./reliability.mjs";
@@ -25,7 +26,7 @@ const complexFixture = await readFile(resolve(extension, "../tests/fixtures/test
 const dynamicFixture = await readFile(resolve(extension, "tests/fixtures/test-dynamic-region-page.html"), "utf8");
 const reliabilityFixture = process.env.RELIABILITY_ONLY ? await readFile(resolve(extension, `tests/fixtures/test-${process.env.RELIABILITY_ONLY}-like-page.html`), "utf8") : null;
 const nestedFixture = process.env.NESTED_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-nested-page.html"), "utf8") : null;
-const adaptiveFixture = process.env.ADAPTIVE_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-adaptive-page.html"), "utf8") : null;
+const adaptiveFixture = (process.env.ADAPTIVE_ONLY || process.env.DIAGNOSTICS_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-adaptive-page.html"), "utf8") : null;
 const server = createServer((req, res) => {
   if (req.url.startsWith('/lazy.svg')) {
     res.setHeader('Content-Type','image/svg+xml');
@@ -90,7 +91,9 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.ADAPTIVE_ONLY) {
+  if (process.env.DIAGNOSTICS_ONLY) {
+    await testDiagnostics({ page, worker, waitFor, capture, PNG });
+  } else if (process.env.ADAPTIVE_ONLY) {
     await testAdaptive({ page, worker, message, waitFor, capture, PNG });
   } else if (process.env.NESTED_ONLY) {
     await testNested({ page, worker, message, waitFor, capture, PNG, browserCDP });

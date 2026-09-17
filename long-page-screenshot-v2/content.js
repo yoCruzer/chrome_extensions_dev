@@ -8,6 +8,7 @@
   function showProgress(status) {
     if (!progress || progress.id !== status.id) return;
     const { host, shadow } = progress;
+    progress.status = status;
     host.style.setProperty("visibility", "visible", "important");
     shadow.querySelector("p").textContent = status.message;
     const result = status.result;
@@ -15,6 +16,7 @@
       ? `${result.filename.split(/[\\/]/).pop()}\n${result.filename}\n${result.width} × ${result.height} 像素${result.bytes >= 0 ? ` · ${(result.bytes / 1048576).toFixed(2)} MB` : ""}` : "";
     shadow.querySelector("#cancel").hidden = !status.busy;
     shadow.querySelector("#close").hidden = !!status.busy;
+    shadow.querySelector("#diagnostics").hidden = !!status.busy;
     shadow.querySelector("#show").hidden = !result;
   }
 
@@ -24,8 +26,25 @@
     host.id = "long-screenshot-v2-progress";
     host.style.cssText = "all:initial!important;position:fixed!important;right:16px!important;bottom:16px!important;z-index:2147483647!important;";
     const shadow = host.attachShadow({ mode: "open" });
-    shadow.innerHTML = `<style>:host{color-scheme:light}section{width:310px;max-height:45vh;overflow:auto;padding:16px;background:#182231;color:white;border-radius:12px;box-shadow:0 5px 25px #0006;font:14px/1.5 system-ui}p{margin:0 0 8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 system-ui}button{padding:7px;cursor:pointer}[hidden]{display:none}</style><section role="status" aria-live="polite"><p></p><pre></pre><button id="cancel">取消</button><button id="show" hidden>在 Finder 中显示</button><button id="close" hidden>关闭</button></section>`;
+    shadow.innerHTML = `<style>:host{color-scheme:light}section{width:310px;max-height:45vh;overflow:auto;padding:16px;background:#182231;color:white;border-radius:12px;box-shadow:0 5px 25px #0006;font:14px/1.5 system-ui}p{margin:0 0 8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 system-ui}button{padding:7px;cursor:pointer}[hidden]{display:none}</style><section role="status" aria-live="polite"><p></p><pre></pre><button id="cancel">取消</button><button id="show" hidden>在 Finder 中显示</button><button id="diagnostics" hidden>复制诊断信息</button><button id="close" hidden>关闭</button></section>`;
     progress = { id, host, shadow };
+    shadow.querySelector("#diagnostics").onclick = async () => {
+      const button = shadow.querySelector("#diagnostics");
+      const json = serializeDiagnostics(progress.status);
+      try {
+        if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(json);
+        else {
+          const field = document.createElement("textarea");
+          field.value = json;
+          shadow.append(field);
+          try {
+            field.select();
+            if (!document.execCommand("copy")) throw new Error("copy failed");
+          } finally { field.remove(); }
+        }
+        button.textContent = "已复制诊断信息";
+      } catch { button.textContent = "复制失败，请重试"; }
+    };
     shadow.querySelector("#cancel").onclick = cancel;
     shadow.querySelector("#close").onclick = () => host.remove();
     shadow.querySelector("#show").onclick = async () => {
@@ -151,15 +170,78 @@
     return region;
   }
 
+  // Only this allowlisted report reaches the clipboard; never copy status.result,
+  // filenames, tab URLs, arbitrary errors, DOM text, or attribute values.
+  function serializeDiagnostics(status) {
+    const numeric = value => Object.fromEntries(Object.entries(value || {}).filter(([, n]) => typeof n === "number" && Number.isFinite(n)));
+    const diagnostics = status.diagnostics || {};
+    const messages = { complete: "截图完成，已保存一张 PNG。", failed: "截图失败。", cancelled: "截图已取消。" };
+    return JSON.stringify({ state: status.state, message: status.reasonCode === "FULL_REFLOW"
+      ? "已截图内容发生变化，需要重新截图。" : messages[status.state] || "截图处理中。",
+      reasonCode: /^[A-Z_]{1,64}$/.test(status.reasonCode || "") ? status.reasonCode : null,
+      attempt: status.attempt || 1, metrics: numeric(status.metrics),
+      diagnostics: { ...numeric(diagnostics), fullProof: diagnostics.fullProof || null }
+    }, null, 2);
+  }
+
+  function proofDiagnostics(s) {
+    return s.proofDiagnostics ||= { trigger: null, counters: {
+      mutations: 0, ignoredMutations: 0, capturedPrefixMutations: 0, witnessVerifications: 0
+    }, trace: [] };
+  }
+
+  function proofTrace(s, event, details = {}) {
+    const diagnostics = proofDiagnostics(s);
+    diagnostics.trace.push({ event, attempt: s.diagnosticAttempt || 1, scrollY,
+      documentHeight: measure().height, viewportHeight: innerHeight,
+      proofEnd: s.fullProof?.end || 0, witnessCount: s.fullProof?.nodes.size || 0,
+      frameCount: s.diagnosticFrames || 0, ...details });
+    if (diagnostics.trace.length > 150) diagnostics.trace.splice(0, diagnostics.trace.length - 150);
+  }
+
+  // Salted, bounded labels allow comparisons within one capture without exporting
+  // raw id/class values (which can contain account IDs, URLs or credentials).
+  const descriptorSalt = Math.random().toString(36);
+  function descriptor(element) {
+    const label = value => {
+      if (!value) return "";
+      let hash = 2166136261;
+      for (const char of descriptorSalt + String(value).slice(0, 120)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+      return `anonymous-${(hash >>> 0).toString(16)}`;
+    };
+    return { tagName: /^[A-Z0-9]{1,20}$/.test(element.tagName) ? element.tagName : "CUSTOM",
+      id: label(element.id), className: label(element.getAttribute?.("class")) };
+  }
+
+  function proofRect(values) {
+    return Object.fromEntries(["x", "y", "width", "height"].map((key, index) => [key, values[index]]));
+  }
+
+  function mutationTrace(s, record, element, r, reason) {
+    proofTrace(s, "mutation", { type: record.type, attributeName: record.attributeName || null,
+      descriptor: descriptor(element), current: proofRect([r.left + scrollX, r.top + scrollY, r.width, r.height]), reason });
+  }
+
   function fullProof(s, watch = false) {
     if (!s.fullProof) return;
     const proof = s.fullProof;
-    const fail = () => { throw Object.assign(new Error("已截图内容发生变化，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" }); };
-    if (proof.invalid) fail();
+    const diagnostics = proofDiagnostics(s);
+    diagnostics.counters.witnessVerifications++;
+    const fail = (trigger, details = {}) => {
+      diagnostics.trigger = trigger;
+      proofTrace(s, "FULL_REFLOW", { trigger, ...details });
+      throw Object.assign(new Error("已截图内容发生变化，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" });
+    };
+    if (proof.invalid) fail("MUTATION_INVALIDATION");
     for (const [element, before] of proof.nodes) {
       const r = element.getBoundingClientRect();
       const current = [r.left + scrollX, r.top + scrollY, r.width, r.height];
-      if (!element.isConnected || current.some((n, i) => Math.abs(n - before[i]) > 0.5)) fail();
+      if (!element.isConnected || current.some((n, i) => Math.abs(n - before[i]) > 0.5)) fail(
+        element.isConnected ? "WITNESS_MOVED" : "WITNESS_REMOVED", {
+          descriptor: descriptor(element), connected: element.isConnected,
+          before: proofRect(before), current: proofRect(current),
+          delta: Object.fromEntries(["dx", "dy", "dw", "dh"].map((key, i) => [key, current[i] - before[i]]))
+        });
     }
     if (!watch) return;
     // Geometric witnesses of painted leaf boxes, not a DOM fingerprint. Appending
@@ -174,6 +256,7 @@
     }
     if (proof.nodes.size > 20000) throw new Error("页面内容过多，请改用选择区域。");
     proof.end = Math.max(proof.end, Math.min(measure().height, scrollY + innerHeight));
+    proofTrace(s, "witness-snapshot");
   }
 
   function regionView(s) {
@@ -280,18 +363,31 @@
     s.observer = new MutationObserver(records => {
       if (s.fullProof) for (const record of records) {
         const proof = s.fullProof;
-        if (record.target === progress?.host || record.target === s.host) continue;
+        const counters = proofDiagnostics(s).counters;
+        counters.mutations++;
+        let capturedPrefix = false;
+        if (record.target === progress?.host || record.target === s.host) { counters.ignoredMutations++; continue; }
         const changed = record.target.nodeType === 3 ? record.target.parentElement : record.target;
         if (changed instanceof HTMLElement && (record.type === "characterData" || record.type === "attributes" || proof.nodes.has(changed))) {
           const r = changed.getBoundingClientRect();
           if (r.width && r.height && r.top + scrollY < proof.end - 0.5 &&
-              getComputedStyle(changed).visibility === "visible" && getComputedStyle(changed).position !== "fixed") proof.invalid = true;
+              getComputedStyle(changed).visibility === "visible" && getComputedStyle(changed).position !== "fixed") {
+            mutationTrace(s, record, changed, r, record.type === "attributes" ? "attribute-change-inside-captured-prefix"
+              : record.type === "characterData" ? "character-data-inside-captured-prefix" : "existing-witness-mutated");
+            capturedPrefix = true;
+            proof.invalid = true;
+          }
         }
         for (const node of record.addedNodes) {
           if (!(node instanceof HTMLElement) || node === progress?.host || node === s.host || node === s.style) continue;
           const r = node.getBoundingClientRect();
-          if (r.width && r.height && r.top + scrollY < proof.end - 0.5 && getComputedStyle(node).position !== "fixed") proof.invalid = true;
+          if (r.width && r.height && r.top + scrollY < proof.end - 0.5 && getComputedStyle(node).position !== "fixed") {
+            mutationTrace(s, record, node, r, "added-node-inside-captured-prefix");
+            capturedPrefix = true;
+            proof.invalid = true;
+          }
         }
+        counters[capturedPrefix ? "capturedPrefixMutations" : "ignoredMutations"]++;
       }
       for (const record of records) for (const node of record.addedNodes) {
         adjustElement(node, s);
@@ -415,8 +511,17 @@
     if (m?.target !== "content" || sender.id !== chrome.runtime.id) return;
     (async () => {
       if (m.type === "BEGIN") { begin(m.id); session.mode = m.mode; if (m.mode === "region") { establishLayout(session); select(session); } return measure(); }
+      if (session?.id === m.id && m.diagnosticContext) {
+        session.diagnosticAttempt = m.diagnosticContext.attempt;
+        session.diagnosticFrames = m.diagnosticContext.frames;
+      }
       // Idempotent cleanup must not clean up a newer session.
-      if (m.type === "FINISH") { if (session?.id === m.id) restore(); return {}; }
+      if (m.type === "FINISH") {
+        const fullProof = session?.id === m.id ? session.proofDiagnostics : undefined;
+        if (fullProof) proofTrace(session, "finish");
+        if (session?.id === m.id) restore();
+        return { fullProof };
+      }
       if (m.type === "PROGRESS") { showProgress(m.status); return {}; }
       const s = requireSession(m.id);
       if (m.type === "HIDE_UI") {
@@ -427,7 +532,12 @@
       if (m.type === "SHOW_UI") { if (progress) progress.host.style.setProperty("visibility", "visible", "important"); return {}; }
       if (m.type === "TOUCH") return {};
       if (m.type === "PREPARE") { s.edges = m.edges || s.edges; prepare(s); return targetView(s); }
-      if (m.type === "FULL_RESET") { s.fullProof = { nodes: new Map(), end: 0, invalid: false }; return {}; }
+      if (m.type === "FULL_RESET") {
+        s.fullProof = { nodes: new Map(), end: 0, invalid: false };
+        proofDiagnostics(s).trigger = null;
+        proofTrace(s, "attempt-start");
+        return {};
+      }
       if (m.type === "MEASURE" && m.watch) fullProof(s, true);
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y, m.relative);
       if (m.type === "BOTTOM") {
@@ -441,7 +551,7 @@
       if (m.type === "MEASURE") return m.viewportOnly
         ? { ...measure(), anchored: !!(s.anchors?.first && s.anchors?.second) } : regionView(s);
       throw new Error("未知页面消息。");
-    })().then(value => respond({ ok: true, ...value }), error => respond({ ok: false, error: error.message, layout: !!error.layout, reasonCode: error.reasonCode, diagnostics: error.diagnostics }));
+    })().then(value => respond({ ok: true, ...(session?.id === m.id && session.proofDiagnostics ? { fullProof: session.proofDiagnostics } : {}), ...value }), error => respond({ ok: false, fullProof: session?.id === m.id ? session.proofDiagnostics : undefined, error: error.message, layout: !!error.layout, reasonCode: error.reasonCode, diagnostics: error.diagnostics }));
     return true;
   });
 })();
