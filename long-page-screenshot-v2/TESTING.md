@@ -110,3 +110,51 @@ Chrome 152.0.7977.84，`DIAGNOSTICS_ONLY=1 node long-page-screenshot-v2/tests/br
 - 两种结束状态都点击真实「复制诊断信息」按钮，再从 Chrome clipboard 读回并解析、与结束 status 对照；复制时没有预授予 clipboard-write 权限。末条 frameCount 与最终状态一致，offscreen 已清理。
 
 首次运行因测试提前授予 clipboard-read 导致写入失败，改为点击成功后才授权读取用于断言，重新运行此 smoke 通过。生产 manifest/权限无修改。日志：`/tmp/full-diagnostics-smoke.log`；成功 smoke 临时产物目录：`screenshot-v2-test-bXZOvK`。未运行重型完整矩阵，也未把本地 fixture 结果当作真实 GitHub/CSDN 实站结论。
+
+
+## Evidence-based Full Page — Phase A
+
+基线 `3e990f16bdf563caf5f0ee64f7114f1b0fde09c1`。删除 mutation → invalid 分支，保留 0.5px 几何阈值及一次重启策略。pending 的采样矩形只在 offscreen FRAME 成功后按实际 tile 相交范围提升为 committed witnesses；commit 时继续比较采样前坐标，防止绘制期间变化被新基线掩盖。没有 mutation 的 CSS 布局变化也始终复核。
+
+定向 Node 命令：`node --test long-page-screenshot-v2/tests/{diagnostics,adaptive,background}.test.mjs`。14/14 通过，含首帧前重建基线、绘制期间 shift、resized/moved/removed、dirty 计数及 150 条上限。Chrome 使用 `PROOF_ONLY=1`、`ADAPTIVE_ONLY=1`、`DIAGNOSTICS_ONLY=1` 分组；不在此阶段运行完整矩阵。
+
+新增 `test-proof-page.html` / `proof.mjs`：GitHub-like class、style、固定图片 src、固定尺寸文字节点、absolute/fixed overlay、CSDN-like carousel（x=-525/-225/75/375）、sidebar style。成功输出逐行比较全部 RGBA（TOP、ROW、BOTTOM、seams），而非只看 complete。另验证首帧 bitmap 期间 +200px 插入不消耗 restart、提交三帧后在 500px 插入 +200px 由 witness 证实、第二次插入/删除 witness 无 PNG。原 adaptive 追加、重复追加、真实重排、无限增长预算保留；诊断复制仍由 Chrome clipboard 读回验证。
+
+
+Phase A 定向实际结果：Node 14/14；Chrome proof 11/11、adaptive 6/6、diagnostics 2/2。日志 `/tmp/proof-targeted.log`、`/tmp/proof-adaptive.log`、`/tmp/proof-diagnostics.log`，均使用真实 captureVisibleTab / offscreen / downloads。初次 overlay fixture 缺少原有启发式要求的 z-index 导致固定浮层进入图片；补齐 fixture 的 overlay 样式后全行验证通过。诊断测试原先错误地把合法 tagName=ARTICLE 当作正文泄露，已改为检测实际正文标记 ARTICLE + 数字；隐私字段断言保留。
+
+## Full Page CaptureTarget — Phase B
+
+使用同一个 scrollableElement/selectTarget/targetView/targetPoint 和已有 scroll/crop/restoration。document 优先；否则按可见尺寸、面积和垂直内容长度选择 dominant target，排除小侧栏和显式编辑器/菜单。Full Page witness、mutation 位置、底部 quiescence 均使用目标内容坐标；外部 lazy image 不阻塞内部容器捕获。
+
+复用真正的 `test-nested-page.html`（html/body overflow:hidden，620px conversation，4800px 内容），新增 `FULL_NESTED_ONLY=1` / `full-nested.mjs`。原始 scrollTop=317；static、首帧 resize、tail growth 4800→5280、提交后 resize、一次插入重启均逐行验证完整 500px 宽 PNG、TOP/MIDDLE/BOTTOM 和所有 seams。第二次插入、cancel、target remove/replace 均无 PNG；真实 service worker 关闭后恢复滚动并清理 offscreen。硬断言所有滚动记录 window.scrollY=0、conversation 到达底部、结束恢复 317；所有外部 shell 像素均排除。已有 NESTED_ONLY Region 同屏/跨屏/resize/取消/删除/替换/worker 恢复定向全部通过。
+
+Node 目标检测补充 document 优先、dominant fallback、sidebars、horizontal-only、不可见及 editor/menu 排除；proof 与 background 针对性合计 16/16 通过。此阶段不运行完整矩阵。
+
+
+Phase B 最终定向：Full Page nested 10/10，通过首帧容器 resize 不消耗 restart、已提交后 resize 一次重启、tail growth、真实双次 reflow 和所有恢复路径。日志 `/tmp/full-nested-targeted.log`、`/tmp/region-nested-targeted.log`。共享代码复核后再次运行 proof 12/12，新增首帧前未提交尾部缩短直接采用新高度；已提交之后的终点缩短仍走原有有界重建策略，但独立标记 `FULL_EXTENT_SHRANK`，不再冒充 witness 已证实的 FULL_REFLOW。相关 Node 18/18。两个阶段未各自运行完整回归。
+
+
+## Evidence-based Proof + Full Page CaptureTarget — 最终统一回归（2026-09-18）
+
+完成两个连续阶段后只运行一轮完整矩阵，全部退出码 0。Node 24.19.0、Chrome 152.0.7977.84。日志与机器可读结果：`/tmp/full-proof-target-final-jkd1w7m7/`（`results.json`）；所有 profile/PNG/日志均在临时目录，未入库。
+
+| 组 | 最终结果 |
+| --- | --- |
+| Node | **50/50** |
+| base | 完整 10337 行横纵拼接、125% zoom、模拟 DPR、cancel/stale、lazy growth、真实 worker 恢复、下载失败清理 |
+| output/UI | Auto/CSS/75/50/device、真实文件路径/show、面板不入图、取消、26000px 自动缩小和超限预检 |
+| dynamic Region | 原有平移、bitmap 期间变化、首帧及提交后 resize、二次 reflow/锚点删除失败、环境诊断 |
+| CSDN-like Region | 同屏/跨屏、client/DPR、resize、真实窗口/zoom/visualScale/tab 改变 |
+| Chat-like Region | 同屏与跨屏逐像素、TOP/middle/BOTTOM、原 sticky 布局保留 |
+| complex | lazy 图片、增长、正文连续、fixed/sticky 恢复、取消/stale/offscreen 故障清理 |
+| Region nested | 7 个场景；同屏/跨屏/resize、cancel/remove/replace、真实 worker 中断 |
+| Full Page adaptive | 6 个场景；static、once、multiple、reflow、repeated、infinite，全行验证或明确无 PNG |
+| Full Page proof | **12/12**；7 类 harmless mutation、首帧 rebase/尾部缩短、+200px committed shift、重复 shift、删除 witness；全 RGBA 和 committedEnd 断言 |
+| Full Page nested | **10/10**；static、首帧 resize、tail growth、提交后 resize、一次/两次 reflow、cancel/remove/replace、真实 worker 中断 |
+| diagnostics | **2/2**；成功/失败点击复制并读回 clipboard，counter/trace/隐私断言 |
+| Retina | 原生 2× device 及 Auto/CSS/75/50、真实 downloads.show |
+
+合计 **12 个 Chrome 分组全部通过**，没有重跑完整矩阵。最后仅更新说明及测试结果。变更仅限 V2；没有生产 manifest/权限、其它扩展、框架或站点适配器修改。
+
+真实 GitHub/CSDN 的旧诊断只证明 mutation 命中，不证明 committed 坐标失效；本轮通过确定性 fixture 验证修正，不声称已重测用户登录态的外网网站。保留虚拟列表、iframe inner scroll、任意二维 nested、无限 feed、Shadow DOM 深层捕获限制；same-box 语义/Canvas/video 变化不是几何证明可保证的像素冻结。全绝对定位内容及多栏同等大滚动目标仍是启发式边界；必要时使用 Region 手选。终点缩短保留有界重建，独立 reasonCode 为 FULL_EXTENT_SHRANK。

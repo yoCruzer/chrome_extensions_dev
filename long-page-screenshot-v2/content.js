@@ -83,25 +83,51 @@
       width: element.scrollWidth, height: element.scrollHeight };
   }
 
-  function targetPoint(s, x, y) {
-    const view = targetView(s);
+  function targetPoint(s, x, y, view = targetView(s)) {
     return { x: x - view.viewportRect.left + view.x, y: y - view.viewportRect.top + view.y };
+  }
+
+  function scrollableElement(element) {
+    const style = getComputedStyle(element), r = element.getBoundingClientRect();
+    return element.isConnected && r.width > 0 && r.height > 0 && style.visibility === "visible" &&
+      ((/(auto|scroll|overlay)/.test(style.overflowY) && element.scrollHeight > element.clientHeight) ||
+       (/(auto|scroll|overlay)/.test(style.overflowX) && element.scrollWidth > element.clientWidth));
+  }
+
+  function selectTarget(s, element) {
+    if (element && !s.targetScrolls.has(element)) s.targetScrolls.set(element, { x: element.scrollLeft, y: element.scrollTop });
+    s.target = element ? { element } : null;
   }
 
   function detectTarget(s) {
     const first = s.anchors?.first?.element, second = s.anchors?.second?.element;
     let selected;
     for (let element = first; element && element !== document.body && element !== document.documentElement; element = element.parentElement) {
-      const style = getComputedStyle(element), r = element.getBoundingClientRect();
-      if (element.isConnected && r.width > 0 && r.height > 0 && style.visibility === "visible" &&
-          (!second || element.contains(second)) &&
-          ((/(auto|scroll|overlay)/.test(style.overflowY) && element.scrollHeight > element.clientHeight) ||
-           (/(auto|scroll|overlay)/.test(style.overflowX) && element.scrollWidth > element.clientWidth))) {
-        selected = element; break;
-      }
+      if ((!second || element.contains(second)) && scrollableElement(element)) { selected = element; break; }
     }
-    if (selected && !s.targetScrolls.has(selected)) s.targetScrolls.set(selected, { x: selected.scrollLeft, y: selected.scrollTop });
-    s.target = selected ? { element: selected } : null;
+    selectTarget(s, selected);
+  }
+
+  function detectFullTarget(s) {
+    const page = measure();
+    const documentScrollable = page.height - page.clientHeight > 64 &&
+      ![document.documentElement, document.body].some(e => /^(hidden|clip)$/.test(getComputedStyle(e).overflowY));
+    if (documentScrollable) { selectTarget(s, null); return; }
+    let selected, best = 0;
+    for (const element of document.querySelectorAll("body *")) {
+      if (!scrollableElement(element) || element.isContentEditable ||
+          element.closest('textarea,select,pre,code,[role="textbox"],[role="listbox"],[role="menu"],[role="dialog"]')) continue;
+      const style = getComputedStyle(element), r = element.getBoundingClientRect();
+      const width = Math.min(innerWidth, r.right) - Math.max(0, r.left);
+      const height = Math.min(innerHeight, r.bottom) - Math.max(0, r.top);
+      if (!/(auto|scroll|overlay)/.test(style.overflowY) || element.scrollHeight - element.clientHeight < 128 ||
+          width < innerWidth * 0.45 || height < innerHeight * 0.5 || width * height < innerWidth * innerHeight * 0.3 ||
+          Number(style.opacity) === 0) continue;
+      const centered = r.left <= innerWidth / 2 && r.right >= innerWidth / 2;
+      const score = width * height * Math.min(3, element.scrollHeight / element.clientHeight) * (centered ? 1.25 : 1);
+      if (score > best) { best = score; selected = element; }
+    }
+    selectTarget(s, selected);
   }
 
   // Element references live only for this document/session, never in the worker.
@@ -186,7 +212,9 @@
 
   function proofDiagnostics(s) {
     return s.proofDiagnostics ||= { trigger: null, counters: {
-      mutations: 0, ignoredMutations: 0, capturedPrefixMutations: 0, witnessVerifications: 0
+      mutations: 0, ignoredMutations: 0, capturedPrefixMutations: 0, witnessVerifications: 0,
+      dirtyMutations: 0, harmlessAfterGeometryCheck: 0, witnessMoved: 0, witnessResized: 0, witnessRemoved: 0,
+      baselineRebasesBeforeFirstFrame: 0
     }, trace: [] };
   }
 
@@ -194,7 +222,9 @@
     const diagnostics = proofDiagnostics(s);
     diagnostics.trace.push({ event, attempt: s.diagnosticAttempt || 1, scrollY,
       documentHeight: measure().height, viewportHeight: innerHeight,
-      proofEnd: s.fullProof?.end || 0, witnessCount: s.fullProof?.nodes.size || 0,
+      targetKind: s.target?.element ? "element" : "window",
+      targetScrollY: s.target?.element?.scrollTop ?? scrollY, targetHeight: s.target?.element?.scrollHeight ?? measure().height,
+      proofEnd: s.fullProof?.committedEnd || 0, committedEnd: s.fullProof?.committedEnd || 0, witnessCount: s.fullProof?.nodes.size || 0,
       frameCount: s.diagnosticFrames || 0, ...details });
     if (diagnostics.trace.length > 150) diagnostics.trace.splice(0, diagnostics.trace.length - 150);
   }
@@ -217,46 +247,88 @@
     return Object.fromEntries(["x", "y", "width", "height"].map((key, index) => [key, values[index]]));
   }
 
-  function mutationTrace(s, record, element, r, reason) {
+  function witnessRect(s, r, view) {
+    const point = targetPoint(s, r.left, r.top, view);
+    return [point.x, point.y, r.width, r.height];
+  }
+
+  function mutationTrace(s, record, element, r, reason, view) {
     proofTrace(s, "mutation", { type: record.type, attributeName: record.attributeName || null,
-      descriptor: descriptor(element), current: proofRect([r.left + scrollX, r.top + scrollY, r.width, r.height]), reason });
+      descriptor: descriptor(element), current: view ? proofRect(witnessRect(s, r, view)) : null, reason });
   }
 
   function fullProof(s, watch = false) {
     if (!s.fullProof) return;
-    const proof = s.fullProof;
-    const diagnostics = proofDiagnostics(s);
+    const proof = s.fullProof, diagnostics = proofDiagnostics(s);
+    const view = targetView(s);
     diagnostics.counters.witnessVerifications++;
-    const fail = (trigger, details = {}) => {
-      diagnostics.trigger = trigger;
-      proofTrace(s, "FULL_REFLOW", { trigger, ...details });
-      throw Object.assign(new Error("已截图内容发生变化，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" });
-    };
-    if (proof.invalid) fail("MUTATION_INVALIDATION");
-    for (const [element, before] of proof.nodes) {
-      const r = element.getBoundingClientRect();
-      const current = [r.left + scrollX, r.top + scrollY, r.width, r.height];
-      if (!element.isConnected || current.some((n, i) => Math.abs(n - before[i]) > 0.5)) fail(
-        element.isConnected ? "WITNESS_MOVED" : "WITNESS_REMOVED", {
-          descriptor: descriptor(element), connected: element.isConnected,
+    const verify = (nodes, committed) => {
+      for (const [element, before] of nodes) {
+        const r = element.getBoundingClientRect();
+        const current = witnessRect(s, r, view);
+        const moved = current.slice(0, 2).some((n, i) => Math.abs(n - before[i]) > 0.5);
+        const resized = current.slice(2).some((n, i) => Math.abs(n - before[i + 2]) > 0.5);
+        if (element.isConnected && !moved && !resized) continue;
+        const trigger = !element.isConnected ? "WITNESS_REMOVED" : moved ? "WITNESS_MOVED" : "WITNESS_RESIZED";
+        const details = { trigger, descriptor: descriptor(element), connected: element.isConnected,
           before: proofRect(before), current: proofRect(current),
-          delta: Object.fromEntries(["dx", "dy", "dw", "dh"].map((key, i) => [key, current[i] - before[i]]))
-        });
+          delta: Object.fromEntries(["dx", "dy", "dw", "dh"].map((key, i) => [key, current[i] - before[i]])) };
+        if (!committed) {
+          proof.pending = new Map();
+          proof.dirty = 0;
+          if (!proof.committedEnd) diagnostics.counters.baselineRebasesBeforeFirstFrame++;
+          proofTrace(s, "uncommitted-rebase", details);
+          throw Object.assign(new Error("当前帧布局变化，正在重新采样。"), { translation: true, reasonCode: "FRAME_MOVED" });
+        }
+        diagnostics.counters[!element.isConnected ? "witnessRemoved" : moved ? "witnessMoved" : "witnessResized"]++;
+        diagnostics.trigger = trigger;
+        proofTrace(s, "dirty-verified-invalid", details);
+        proofTrace(s, "FULL_REFLOW", details);
+        throw Object.assign(new Error("已截图内容发生变化，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" });
+      }
+    };
+    // Always verify: CSS/layout changes can occur without a MutationObserver record.
+    verify(proof.nodes, true);
+    verify(proof.pending, false);
+    if (proof.dirty) {
+      diagnostics.counters.harmlessAfterGeometryCheck += proof.dirty;
+      proofTrace(s, "dirty-verified-harmless", { dirtyMutations: proof.dirty });
+      proof.dirty = 0;
     }
     if (!watch) return;
-    // Geometric witnesses of painted leaf boxes, not a DOM fingerprint. Appending
-    // below them leaves these coordinates valid; insertion/reflow above does not.
-    for (const element of document.querySelectorAll("body *")) {
+    proof.pending = new Map();
+    // Only normal-flow painted boxes certify content coordinates. Out-of-flow UI
+    // can animate over the prefix without moving the already captured content.
+    for (const element of s.target?.element ? s.target.element.querySelectorAll("*") : document.querySelectorAll("body *")) {
       if (element === progress?.host || element === s.host || element.children.length ||
           ["SCRIPT", "STYLE", "LINK"].includes(element.tagName)) continue;
       const r = element.getBoundingClientRect(), style = getComputedStyle(element);
-      if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth ||
-          !r.width || !r.height || style.visibility !== "visible" || style.position === "fixed") continue;
-      proof.nodes.set(element, [r.left + scrollX, r.top + scrollY, r.width, r.height]);
+      if (r.bottom <= view.viewportRect.top || r.top >= view.viewportRect.top + view.clientHeight ||
+          r.right <= view.viewportRect.left || r.left >= view.viewportRect.left + view.clientWidth ||
+          !r.width || !r.height || style.visibility !== "visible") continue;
+      let overlay = false;
+      for (let parent = element; parent && parent !== document.body && parent !== s.target?.element; parent = parent.parentElement) {
+        if (["fixed", "absolute", "sticky"].includes(getComputedStyle(parent).position)) { overlay = true; break; }
+      }
+      if (!overlay) proof.pending.set(element, witnessRect(s, r, view));
     }
-    if (proof.nodes.size > 20000) throw new Error("页面内容过多，请改用选择区域。");
-    proof.end = Math.max(proof.end, Math.min(measure().height, scrollY + innerHeight));
-    proofTrace(s, "witness-snapshot");
+    if (proof.nodes.size + proof.pending.size > 20000) throw new Error("页面内容过多，请改用选择区域。");
+    proofTrace(s, "witness-snapshot", { pendingWitnessCount: proof.pending.size });
+  }
+
+  function commitFullProof(s, rect) {
+    const proof = s.fullProof;
+    // Called only after offscreen FRAME succeeds. Keep the pre-bitmap geometry:
+    // taking a fresh baseline here could conceal movement during canvas drawing.
+    for (const [element, r] of proof.pending) {
+      if (r[0] < rect.right && r[0] + r[2] > rect.x && r[1] < rect.bottom && r[1] + r[3] > rect.y) {
+        proof.nodes.set(element, r);
+      }
+    }
+    proof.pending = new Map();
+    proof.committedEnd = Math.max(proof.committedEnd, rect.bottom);
+    fullProof(s);
+    proofTrace(s, "frame-committed");
   }
 
   function regionView(s) {
@@ -322,22 +394,25 @@
 
   function adjustElement(element, s) {
     if (!(element instanceof HTMLElement) || s.changed.has(element) || element === s.host || element === progress?.host) return;
+    if (s.mode === "full" && s.target?.element && (element === s.target.element || !s.target.element.contains(element))) return;
     const style = getComputedStyle(element);
     const position = style.position;
     if (position !== "fixed" && position !== "sticky") return;
     s.candidates.add(element);
     const rect = element.getBoundingClientRect();
-    const width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
+    const scope = s.mode === "full" && s.target?.element ? targetView(s) : null;
+    const width = scope?.clientWidth || document.documentElement.clientWidth, height = scope?.clientHeight || document.documentElement.clientHeight;
+    const left = scope?.viewportRect.left || 0, top = scope?.viewportRect.top || 0;
     if (style.visibility !== "visible" || Number(style.opacity) === 0 ||
         rect.width < 16 || rect.height < 16 || Number(style.zIndex) < 0 ||
-        (s.mode !== "region" && (rect.bottom <= 0 || rect.right <= 0 || rect.top >= height || rect.left >= width))) return;
+        (s.mode !== "region" && (rect.bottom <= top || rect.right <= left || rect.top >= top + height || rect.left >= left + width))) return;
     // Leave large application shells/backgrounds alone. Only bounded overlays
     // or sticky blocks with an actual inset are likely to repeat over content.
     if (rect.width * rect.height > width * height * 0.65) return;
-    const atEdge = rect.top <= 2 || rect.left <= 2 || rect.bottom >= height - 2 || rect.right >= width - 2;
+    const atEdge = rect.top <= top + 2 || rect.left <= left + 2 || rect.bottom >= top + height - 2 || rect.right >= left + width - 2;
     if (position === "fixed" && !atEdge && !(Number(style.zIndex) > 0)) return;
     if (position === "sticky" && [style.top, style.right, style.bottom, style.left].every(value => value === "auto")) return;
-    const changes = s.mode === "region" || position === "fixed" ? { visibility: "hidden", opacity: "0" }
+    const changes = s.mode === "region" || s.target?.element || position === "fixed" ? { visibility: "hidden", opacity: "0" }
       : { position: "relative", top: "auto", right: "auto", bottom: "auto", left: "auto" };
     s.changed.set(element, Object.keys(changes).map(key => [key, element.style.getPropertyValue(key), element.style.getPropertyPriority(key)]));
     for (const [key, value] of Object.entries(changes)) element.style.setProperty(key, value, "important");
@@ -348,6 +423,7 @@
     s.removeSelectionListener?.();
     s.host?.remove();
     s.capturing = true;
+    if (s.mode === "full") detectFullTarget(s);
     if (!s.style) establishLayout(s);
     for (const name of ["wheel", "touchmove", "pointerdown"]) document.addEventListener(name, onInput, { capture: true, passive: false });
   }
@@ -365,29 +441,21 @@
         const proof = s.fullProof;
         const counters = proofDiagnostics(s).counters;
         counters.mutations++;
-        let capturedPrefix = false;
-        if (record.target === progress?.host || record.target === s.host) { counters.ignoredMutations++; continue; }
+        if (record.target === progress?.host || record.target === s.host || record.target === s.style) {
+          counters.ignoredMutations++; continue;
+        }
         const changed = record.target.nodeType === 3 ? record.target.parentElement : record.target;
-        if (changed instanceof HTMLElement && (record.type === "characterData" || record.type === "attributes" || proof.nodes.has(changed))) {
-          const r = changed.getBoundingClientRect();
-          if (r.width && r.height && r.top + scrollY < proof.end - 0.5 &&
-              getComputedStyle(changed).visibility === "visible" && getComputedStyle(changed).position !== "fixed") {
-            mutationTrace(s, record, changed, r, record.type === "attributes" ? "attribute-change-inside-captured-prefix"
-              : record.type === "characterData" ? "character-data-inside-captured-prefix" : "existing-witness-mutated");
-            capturedPrefix = true;
-            proof.invalid = true;
-          }
-        }
-        for (const node of record.addedNodes) {
-          if (!(node instanceof HTMLElement) || node === progress?.host || node === s.host || node === s.style) continue;
-          const r = node.getBoundingClientRect();
-          if (r.width && r.height && r.top + scrollY < proof.end - 0.5 && getComputedStyle(node).position !== "fixed") {
-            mutationTrace(s, record, node, r, "added-node-inside-captured-prefix");
-            capturedPrefix = true;
-            proof.invalid = true;
-          }
-        }
-        counters[capturedPrefix ? "capturedPrefixMutations" : "ignoredMutations"]++;
+        if (!(changed instanceof HTMLElement)) { counters.ignoredMutations++; continue; }
+        const r = changed.getBoundingClientRect();
+        // Target removal/hiding is reported through the next request, not thrown
+        // asynchronously out of MutationObserver while recording evidence.
+        let view;
+        try { view = targetView(s); } catch { /* TARGET_UNRESOLVABLE at checkpoint */ }
+        counters.capturedPrefixMutations += Number(!!view && witnessRect(s, r, view)[1] < proof.committedEnd);
+        counters.dirtyMutations++;
+        proof.dirty++;
+        mutationTrace(s, record, changed, r, "mutation-observed", view);
+        proofTrace(s, "mutation-marked-dirty", { type: record.type, attributeName: record.attributeName || null });
       }
       for (const record of records) for (const node of record.addedNodes) {
         adjustElement(node, s);
@@ -424,12 +492,13 @@
         x: view.x - view.region.x, y: view.y - view.region.y,
         width: view.region.width, height: view.region.height } : { x: view.x, y: view.y, innerWidth: view.innerWidth, innerHeight: view.innerHeight });
       const imagesLoading = [...document.images].some(img => {
-        if (img.complete) return false;
+        if (img.complete || (s.target?.element && !s.target.element.contains(img))) return false;
         const rect = img.getBoundingClientRect();
         const a = targetPoint(s, rect.left, rect.top), b = targetPoint(s, rect.right, rect.bottom);
         if (view.region && (b.x <= view.region.x || a.x >= view.region.x + view.region.width ||
             b.y <= view.region.y || a.y >= view.region.y + view.region.height)) return false;
-        return rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+        return rect.bottom > view.viewportRect.top && rect.top < view.viewportRect.top + view.clientHeight &&
+          rect.right > view.viewportRect.left && rect.left < view.viewportRect.left + view.clientWidth;
       });
       stable = signature === previous && !imagesLoading ? stable + 1 : 0;
       previous = signature;
@@ -533,25 +602,30 @@
       if (m.type === "TOUCH") return {};
       if (m.type === "PREPARE") { s.edges = m.edges || s.edges; prepare(s); return targetView(s); }
       if (m.type === "FULL_RESET") {
-        s.fullProof = { nodes: new Map(), end: 0, invalid: false };
+        s.fullProof = { nodes: new Map(), pending: new Map(), committedEnd: 0, dirty: 0 };
         proofDiagnostics(s).trigger = null;
-        proofTrace(s, "attempt-start");
-        return {};
+        if (m.rebase) proofDiagnostics(s).counters.baselineRebasesBeforeFirstFrame++;
+        proofTrace(s, m.rebase ? "baseline-rebase" : "attempt-start");
+        return targetView(s);
       }
+      if (m.type === "FULL_COMMIT") { commitFullProof(s, m.rect); return {}; }
       if (m.type === "MEASURE" && m.watch) fullProof(s, true);
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y, m.relative);
       if (m.type === "BOTTOM") {
         fullProof(s);
+        const view = targetView(s);
         const loading = [...document.images].some(img => {
+          if (s.target?.element && !s.target.element.contains(img)) return false;
           const r = img.getBoundingClientRect();
-          return !img.complete && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
+          return !img.complete && r.bottom > view.viewportRect.top && r.top < view.viewportRect.top + view.clientHeight &&
+            r.right > view.viewportRect.left && r.left < view.viewportRect.left + view.clientWidth;
         });
-        return { ...measure(), loading };
+        return { ...view, loading };
       }
       if (m.type === "MEASURE") return m.viewportOnly
         ? { ...measure(), anchored: !!(s.anchors?.first && s.anchors?.second) } : regionView(s);
       throw new Error("未知页面消息。");
-    })().then(value => respond({ ok: true, ...(session?.id === m.id && session.proofDiagnostics ? { fullProof: session.proofDiagnostics } : {}), ...value }), error => respond({ ok: false, fullProof: session?.id === m.id ? session.proofDiagnostics : undefined, error: error.message, layout: !!error.layout, reasonCode: error.reasonCode, diagnostics: error.diagnostics }));
+    })().then(value => respond({ ok: true, ...(session?.id === m.id && session.proofDiagnostics ? { fullProof: session.proofDiagnostics } : {}), ...value }), error => respond({ ok: false, fullProof: session?.id === m.id ? session.proofDiagnostics : undefined, error: error.message, layout: !!error.layout, translation: !!error.translation, reasonCode: error.reasonCode, diagnostics: error.diagnostics }));
     return true;
   });
 })();

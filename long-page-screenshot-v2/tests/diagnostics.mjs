@@ -29,9 +29,9 @@ export async function testDiagnostics({page,capture,waitFor,worker,PNG}) {
     assert.ok(report.diagnostics.fullProof.trace.length<=150);
     assert.ok(report.diagnostics.fullProof.counters.witnessVerifications>0);
     assert.equal(report.diagnostics.fullProof.counters.mutations,
-      report.diagnostics.fullProof.counters.ignoredMutations+report.diagnostics.fullProof.counters.capturedPrefixMutations);
+      report.diagnostics.fullProof.counters.ignoredMutations+report.diagnostics.fullProof.counters.dirtyMutations);
     assert.equal(report.diagnostics.fullProof.trace.at(-1).frameCount,result.frames);
-    assert.doesNotMatch(text,/data:image|ARTICLE|INSERTED ABOVE|SECOND REFLOW|filename|127\.0\.0\.1/);
+    assert.doesNotMatch(text,/data:image|ARTICLE \d|INSERTED ABOVE|SECOND REFLOW|filename|127\.0\.0\.1/);
     if(mode==='success') {
       assert.equal(report.reasonCode,null);assert.equal(report.diagnostics.fullProof.trigger,null);
       const png=PNG.sync.read(await readFile(result.result.filename));
@@ -46,11 +46,11 @@ export async function testDiagnostics({page,capture,waitFor,worker,PNG}) {
       assert.equal(result.metrics.retries,0);
     } else {
       assert.equal(report.reasonCode,'FULL_REFLOW');
-      assert.equal(report.diagnostics.fullProof.trigger,'MUTATION_INVALIDATION');
+      assert.equal(report.diagnostics.fullProof.trigger,'WITNESS_MOVED');
       assert.equal(report.diagnostics.fullPageRestarts,1);assert.equal(result.attempt,2);
       assert.equal(result.result,undefined);assert.equal(result.parts,0);
-      for(const attempt of [1,2]) assert.ok(report.diagnostics.fullProof.trace.some(t=>t.attempt===attempt&&t.trigger==='MUTATION_INVALIDATION'));
-      assert.ok(report.diagnostics.fullProof.trace.some(t=>t.reason==='added-node-inside-captured-prefix'));
+      for(const attempt of [1,2]) assert.ok(report.diagnostics.fullProof.trace.some(t=>t.attempt===attempt&&t.trigger==='WITNESS_MOVED'));
+      assert.ok(report.diagnostics.fullProof.trace.some(t=>t.event==='mutation-marked-dirty'));
     }
     assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);
     console.log('PASS diagnostics Chrome',mode,JSON.stringify(report));

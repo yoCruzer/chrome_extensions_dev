@@ -11,5 +11,5 @@ test('adaptive end bounds growth amount, cycles, and invalidating shrink',()=>{
  assert.throws(()=>adaptiveEnd(state(),5300,700),e=>e.reasonCode==='FULL_GROWTH_LIMIT');
  const s=state();for(let i=1;i<=MAX_END_EXTENSIONS;i++)adaptiveEnd(s,2400+i,700);
  assert.throws(()=>adaptiveEnd(s,2500,700),e=>e.reasonCode==='FULL_GROWTH_LIMIT');
- assert.throws(()=>adaptiveEnd(state(),2399,700),e=>e.layout&&e.reasonCode==='FULL_REFLOW');
+ assert.throws(()=>adaptiveEnd(state(),2399,700),e=>e.layout&&e.reasonCode==='FULL_EXTENT_SHRANK');
 });

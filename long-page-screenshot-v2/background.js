@@ -43,7 +43,7 @@ async function request(s, target, type, payload = {}) {
     : await chrome.runtime.sendMessage(message);
   check(s);
   if (response?.fullProof) s.fullProofDiagnostics = response.fullProof;
-  if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout, reasonCode: response?.reasonCode, diagnostics: response?.diagnostics });
+  if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout, translation: !!response?.translation, reasonCode: response?.reasonCode, diagnostics: response?.diagnostics });
   if (s.mode === "region" && s.environment && target === "content" && ["MEASURE", "SCROLL"].includes(type)) {
     response.tabZoom = await chrome.tabs.getZoom(s.tab.id);
     check(s);
@@ -119,8 +119,19 @@ function validateView(s, view) {
     validateRegion(s, view);
     return;
   }
+  if (s.viewport.targetKind === "element") {
+    if (["innerWidth", "innerHeight", "dpr", "visualScale"].some(key => view[key] !== s.viewport[key])) {
+      throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
+    }
+    if (view.clientWidth !== s.viewport.clientWidth || view.clientHeight !== s.viewport.clientHeight || view.width !== s.viewport.width) {
+      throw Object.assign(new Error("滚动容器尺寸发生变化，正在重新截图。"), { layout: true, reasonCode: "TARGET_RESIZED" });
+    }
+    return;
+  }
   if (!sameViewport(s.viewport, view) || view.visualScale !== 1) throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
-  if (view.width !== s.viewport.width) throw new Error("页面宽度发生变化，请等待页面稳定后重试。");
+  if (view.width !== s.viewport.width) throw Object.assign(new Error("页面宽度发生变化，请等待页面稳定后重试。"), {
+    layout: !s.frames, reasonCode: "FULL_WIDTH_CHANGED"
+  });
 }
 
 function validateEnvironment(s, actual) {
@@ -174,6 +185,11 @@ async function capture(s, view) {
       // Only this uncommitted frame moved; keep already verified canvas pixels.
       s.metrics.frameRetries++;
       view = await scroll(s, target.x, target.y);
+      if (s.mode === "full" && !s.frames) {
+        s.region = { x: 0, y: 0, width: view.width, height: view.height };
+        s.full.end = view.height;
+        s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
+      }
     }
   }
 }
@@ -185,7 +201,11 @@ async function captureOnce(s, view) {
   await request(s, "content", "HIDE_UI");
   try {
     if (s.mode === "full") {
-      validateView(s, await request(s, "content", "MEASURE", { watch: true }));
+      const before = await request(s, "content", "MEASURE", { watch: true });
+      validateView(s, before);
+      if (before.x !== view.x || before.y !== view.y || before.viewportRect?.left !== view.viewportRect?.left || before.viewportRect?.top !== view.viewportRect?.top) {
+        throw Object.assign(new Error("当前帧位置变化，正在重新采样。"), { translation: true });
+      }
     }
     if (s.mode === "region") {
       const before = await request(s, "content", "MEASURE");
@@ -204,7 +224,9 @@ async function captureOnce(s, view) {
     if (s.mode === "region" && (after.region.x !== view.region.x || after.region.y !== view.region.y || after.viewportRect?.left !== view.viewportRect?.left || after.viewportRect?.top !== view.viewportRect?.top)) {
       throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true });
     }
-    if (after.x !== view.x || after.y !== view.y) throw new Error("截图时页面发生移动，请重试。");
+    if (after.x !== view.x || after.y !== view.y || after.viewportRect?.left !== view.viewportRect?.left || after.viewportRect?.top !== view.viewportRect?.top) {
+      throw Object.assign(new Error("截图时页面发生移动，请重试。"), { translation: s.mode === "full" });
+    }
     return dataUrl;
   } finally {
     await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "SHOW_UI", id: s.id }, { frameId: 0 }).catch(() => {});
@@ -212,6 +234,11 @@ async function captureOnce(s, view) {
 }
 
 async function extendEnd(s, view) {
+  if (!s.frames && !s.offscreen && view.height < s.full.end) {
+    s.full.end = view.height;
+    s.region = { ...s.region, height: view.height };
+    return;
+  }
   if (!adaptiveEnd(s.full, view.height, view.clientHeight)) return;
   s.region = { ...s.region, height: s.full.end };
   if (s.offscreen) s.outputSize = await request(s, "offscreen", "EXTEND", { region: s.region });
@@ -298,13 +325,27 @@ async function run(s) {
           }
         } else {
           if (attempt) s.metrics.retries++;
-          await request(s, "content", "FULL_RESET");
-          view = await scroll(s, 0, 0);
-          s.region = { x: 0, y: 0, width: view.width, height: view.height };
-          s.full ||= { initialHeight: view.height, maxObservedHeight: view.height, endExtensions: 0, bottomStableSamples: 0 };
-          s.full.end = view.height;
-          s.full.fullPageRestarts = attempt;
-          s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
+          for (let sample = 0; sample < 3; sample++) {
+            try {
+              const reset = await request(s, "content", "FULL_RESET", { rebase: sample > 0 });
+              s.viewport = { ...s.viewport, width: reset.width, clientWidth: reset.clientWidth, clientHeight: reset.clientHeight };
+              view = await scroll(s, 0, 0);
+              s.region = { x: 0, y: 0, width: view.width, height: view.height };
+              s.full ||= { initialHeight: view.height, maxObservedHeight: view.height, endExtensions: 0, bottomStableSamples: 0 };
+              s.full.end = view.height;
+              s.full.fullPageRestarts = attempt;
+              s.full.targetKind = view.targetKind;
+              s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
+              const estimated = s.output === "device" ? view.dpr : 1;
+              outputGeometry(s.region, view, { width: view.innerWidth * estimated, height: view.innerHeight * estimated }, s.output);
+              ({ view, dataUrl } = await capture(s, view));
+              break;
+            } catch (error) {
+              if (!error.layout) throw error;
+              if (sample === 2) throw Object.assign(new Error("首帧布局持续变化，请稍后重试。"), { reasonCode: "FRAME_NOT_SETTLED" });
+              s.metrics.frameRetries++;
+            }
+          }
         }
         // Reject impossible fixed sizes before the first screenshot. Device scale
         // is checked again against the actual first bitmap (not emulated DPR).
@@ -338,6 +379,7 @@ async function run(s) {
             await request(s, "offscreen", "FRAME", { view: tileView, rect, dataUrl });
             dataUrl = null;
             s.frames++;
+            if (s.mode === "full") await request(s, "content", "FULL_COMMIT", { rect });
             x = rect.right;
             const done = (y - s.region.y) * s.region.width + (rect.bottom - y) * (x - s.region.x);
             await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(done / (s.region.width * s.region.height) * 100))}% · ${s.frames} 帧`);
