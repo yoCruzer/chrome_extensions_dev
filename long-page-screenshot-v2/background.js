@@ -42,7 +42,7 @@ async function request(s, target, type, payload = {}) {
     ? await chrome.tabs.sendMessage(s.tab.id, message, { frameId: 0 })
     : await chrome.runtime.sendMessage(message);
   check(s);
-  if (!response?.ok) throw new Error(response?.error || "截图组件未响应。");
+  if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout });
   return response;
 }
 
@@ -71,7 +71,7 @@ async function start(mode, output = "auto") {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^(https?|file):\/\//.test(tab.url || "")) throw new Error("请在普通网页中使用；浏览器内部页面不支持截图。");
   if (active) throw new Error("已有截图任务，请先取消或等待完成。");
-  const s = { id: crypto.randomUUID(), tab, mode, output, metrics: { captures: 0, settles: 0, encodeMs: 0, saveMs: 0, retries: 0 }, started: Date.now(), frames: 0, parts: 0, cancelled: false };
+  const s = { id: crypto.randomUUID(), tab, mode, output, metrics: { captures: 0, settles: 0, encodeMs: 0, saveMs: 0, retries: 0, frameRetries: 0 }, started: Date.now(), frames: 0, parts: 0, cancelled: false };
   active = s;
   try {
     await status(s, "preparing", "正在准备页面…");
@@ -97,29 +97,53 @@ async function ensureVisible(s) {
 
 function validateView(s, view) {
   if (!sameViewport(s.viewport, view) || view.visualScale !== 1) throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
-  if (view.width !== s.viewport.width) throw new Error("页面宽度发生变化，请等待页面稳定后重试。");
+  if (s.mode === "full" && view.width !== s.viewport.width) throw new Error("页面宽度发生变化，请等待页面稳定后重试。");
   if (s.mode === "region") validateRegion(s, view);
 }
 
 function validateRegion(s, page) {
-  if (page.width !== s.selectionPage.width || page.height !== s.selectionPage.height ||
-      !sameViewport(s.selectionPage, page) || page.visualScale !== s.selectionPage.visualScale) {
-    throw new Error("选择区域后页面尺寸或视口发生变化，请等待加载完成后重新选择区域。");
+  if (!sameViewport(s.selectionPage, page) || page.visualScale !== s.selectionPage.visualScale) {
+    throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
   }
-  regionFromEdges({ left: s.region.x, top: s.region.y,
-    right: s.region.x + s.region.width, bottom: s.region.y + s.region.height }, page);
+  if (s.region && page.region && (Math.abs(page.region.width - s.region.width) > 0.01 ||
+      Math.abs(page.region.height - s.region.height) > 0.01 || page.scope !== s.scope)) {
+    throw Object.assign(new Error("所选内容本身持续变化，请稍后重试。"), { layout: true });
+  }
+}
+
+// Stitch in the attempt's coordinate system even when the real document moves.
+function relativeView(s, view) {
+  if (s.mode !== "region") return view;
+  return { ...view, x: view.x - view.region.x + s.region.x, y: view.y - view.region.y + s.region.y };
 }
 
 async function scroll(s, x, y) {
+  s.scrollTarget = { x, y };
   s.metrics.settles++;
   await status(s, s.frames ? "capturing" : "loading", `正在等待当前内容稳定 / 加载 · 已处理 ${s.frames} 帧…`);
   await ensureVisible(s);
-  const view = await request(s, "content", "SCROLL", { x: Math.floor(x), y: Math.floor(y) });
+  if (s.mode === "region") await delay(Math.max(0, 550 - (Date.now() - lastCapture)));
+  const view = await request(s, "content", "SCROLL", s.mode === "region"
+    ? { x: x - s.region.x, y: y - s.region.y, relative: true }
+    : { x: Math.floor(x), y: Math.floor(y) });
   validateView(s, view);
   return view;
 }
 
 async function capture(s, view) {
+  const target = s.scrollTarget;
+  for (let sample = 0; sample < 3; sample++) {
+    try { return { view, dataUrl: await captureOnce(s, view) }; }
+    catch (error) {
+      if (!error.translation || sample === 2) throw error;
+      // Only this uncommitted frame moved; keep already verified scope pixels.
+      s.metrics.frameRetries++;
+      view = await scroll(s, target.x, target.y);
+    }
+  }
+}
+
+async function captureOnce(s, view) {
   // Chrome allows at most two captureVisibleTab calls per second.
   await delay(Math.max(0, 550 - (Date.now() - lastCapture)));
   await ensureVisible(s);
@@ -131,7 +155,10 @@ async function capture(s, view) {
     await ensureVisible(s);
     const after = await request(s, "content", "MEASURE");
     validateView(s, after);
-    if (after.height !== view.height) throw Object.assign(new Error("截图时页面高度发生变化。"), { layout: true });
+    if (s.mode === "full" && after.height !== view.height) throw Object.assign(new Error("截图时页面高度发生变化。"), { layout: true });
+    if (s.mode === "region" && (after.region.x !== view.region.x || after.region.y !== view.region.y)) {
+      throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true });
+    }
     if (after.x !== view.x || after.y !== view.y) throw new Error("截图时页面发生移动，请重试。");
     return dataUrl;
   } finally {
@@ -184,13 +211,23 @@ async function saveImage(s, url) {
 async function run(s) {
   try {
     await status(s, "preparing", "正在准备截图…");
-    s.viewport = await request(s, "content", "PREPARE");
+    s.viewport = await request(s, "content", "PREPARE", { edges: s.edges });
     if (s.mode === "region") validateRegion(s, s.viewport);
     if (s.viewport.visualScale !== 1 || s.viewport.clientHeight < 64 || s.viewport.clientWidth < 64) throw new Error("请恢复触控缩放并增大浏览器窗口。");
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         let view;
-        if (attempt) {
+        if (s.mode === "region") {
+          const resolved = await request(s, "content", "MEASURE");
+          s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
+            right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
+          s.scope = resolved.scope;
+          if (attempt) {
+            s.metrics.retries++;
+            await status(s, "loading", "所选内容发生变化，正在重新截图…");
+          }
+          view = await scroll(s, s.region.x, s.region.y);
+        } else if (attempt) {
           s.metrics.retries++;
           await status(s, "loading", "布局发生变化，正在安全预加载并重新截图…");
           view = await warm(s);
@@ -204,12 +241,13 @@ async function run(s) {
         const estimatedSource = s.output === "device" ? view.dpr : 1;
         outputGeometry(s.region, view, { width: view.innerWidth * estimatedSource,
           height: view.innerHeight * estimatedSource }, s.output);
-        let dataUrl = await capture(s, view);
+        let dataUrl;
+        ({ view, dataUrl } = await capture(s, view));
         s.offscreen = true;
         const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
         if (contexts.length) await chrome.offscreen.closeDocument();
         await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch frames into one bounded PNG." });
-        const scale = await request(s, "offscreen", "OPEN", { region: s.region, view, dataUrl, output: s.output });
+        const scale = await request(s, "offscreen", "OPEN", { region: s.region, view: relativeView(s, view), dataUrl, output: s.output });
         s.outputSize = scale;
         await request(s, "offscreen", "PART", { start: 0, height: scale.height });
         let y = s.region.y;
@@ -219,12 +257,13 @@ async function run(s) {
             if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
             if (!dataUrl) {
               view = await scroll(s, x, y);
-              if (view.height !== s.stableHeight) throw Object.assign(new Error("页面高度仍在变化，请等待加载完成后重试。"), { layout: true });
-              dataUrl = await capture(s, view);
+              if (s.mode === "full" && view.height !== s.stableHeight) throw Object.assign(new Error("页面高度仍在变化，请等待加载完成后重试。"), { layout: true });
+              ({ view, dataUrl } = await capture(s, view));
             }
-            const rect = visibleTile(s.region, view, x, y, bandBottom);
+            const tileView = relativeView(s, view);
+            const rect = visibleTile(s.region, tileView, x, y, bandBottom);
             bandBottom = rect.bottom;
-            await request(s, "offscreen", "FRAME", { view, rect, dataUrl });
+            await request(s, "offscreen", "FRAME", { view: tileView, rect, dataUrl });
             dataUrl = null;
             s.frames++;
             x = rect.right;
@@ -233,6 +272,7 @@ async function run(s) {
           }
           y = bandBottom;
         }
+        if (s.mode === "region") validateView(s, await request(s, "content", "MEASURE"));
         await status(s, "encoding", `正在生成图片 · ${scale.width} × ${scale.height} 像素…`);
         const encodeStart = Date.now();
         const { url } = await request(s, "offscreen", "EXPORT");
@@ -244,7 +284,7 @@ async function run(s) {
         await request(s, "offscreen", "RELEASE", { final: true });
         break;
       } catch (error) {
-        if (!error.layout || attempt || s.mode !== "full" || s.cancelled) throw error;
+        if (!error.layout || attempt || s.cancelled) throw error;
         if (s.offscreen) {
           await request(s, "offscreen", "CLOSE");
           await chrome.offscreen.closeDocument();
@@ -281,7 +321,9 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
       try {
         await status(s, "preparing", "正在复核选区…");
         const page = await request(s, "content", "MEASURE");
-        s.region = regionFromEdges(m.edges, page);
+        regionFromEdges(page.region ? { left: page.region.x, top: page.region.y,
+          right: page.region.x + page.region.width, bottom: page.region.y + page.region.height } : m.edges, page);
+        s.edges = m.edges;
         validateRegion(s, page);
         void run(s);
         return {};

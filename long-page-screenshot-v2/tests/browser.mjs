@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testDynamicRegion } from "./dynamic.mjs";
 import { testComplexPage } from "./complex.mjs";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -18,7 +19,8 @@ const fixture = `<!doctype html><style>html{scroll-behavior:smooth;scroll-snap-t
 const c=document.querySelector('canvas'),ctx=c.getContext('2d');for(let y=0;y<c.height;y++){ctx.fillStyle='rgb('+(y%251)+','+Math.floor(y/251)+',97)';ctx.fillRect(0,y,c.width,1)};
 </script>`;
 const complexFixture = await readFile(resolve(extension, "../tests/fixtures/test-complex-page.html"), "utf8");
-const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(process.env.COMPLEX_ONLY ? complexFixture : fixture); });
+const dynamicFixture = await readFile(resolve(extension, "tests/fixtures/test-dynamic-region-page.html"), "utf8");
+const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture); });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
   ...(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: "chromium" }),
@@ -77,7 +79,9 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.OUTPUT_ONLY) {
+  if (process.env.DYNAMIC_ONLY) {
+    await testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG });
+  } else if (process.env.OUTPUT_ONLY) {
     const panel = page.locator("#long-screenshot-v2-progress");
     for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5], ["device", 1]]) {
       const job = await capture("region", output);

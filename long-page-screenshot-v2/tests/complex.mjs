@@ -75,15 +75,18 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   await writeFile(join(root, 'complex-region-result.json'), JSON.stringify({ region, regionFiles, edges }, null, 2));
   console.log('PASS complex region: real two-corner UI, article-only dimensions and continuous border through every row');
 
-  // Change height while the selection UI is open, even when its edges still fit.
+  // Numeric submission deliberately keeps coordinate semantics; global growth
+  // before preparation is allowed when the requested rectangle remains valid.
   const stale = await capture('region');
   const oldEdges = await regionEdges();
   await page.evaluate(() => document.getElementById('grow').click());
-  const rejected = await selectRegion(stale, oldEdges, false);
-  assert.match(rejected.error, /尺寸或视口发生变化/);
-  assert.equal((await waitFor(s => !s.busy)).state, 'failed');
+  await selectRegion(stale, oldEdges);
+  const coordinates = await waitFor(s => !s.busy);
+  assert.equal(coordinates.state, 'complete', JSON.stringify(coordinates));
+  const coordinatePNG = PNG.sync.read(await readFile(coordinates.result.filename));
+  assert.equal(coordinatePNG.height, oldEdges.bottom - oldEdges.top);
   await assertRestored(before, position);
-  console.log('PASS stale region: changed page height rejected even with boundaries still inside page');
+  console.log('PASS numeric fallback retains requested coordinates after outside document growth');
 
   // Shrinking the page invalidates a selected bottom edge.
   const shrinking = await capture('region');
@@ -93,16 +96,16 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   await waitFor(s => !s.busy);
   await assertRestored(before, position);
 
-  // Region warm-up must reject growth rather than silently crop stale coordinates.
+  // A one-time local change restarts the numeric capture with a fresh canvas.
   const warming = await capture('region');
   await selectRegion(warming, await regionEdges());
   await waitFor(s => s.state === 'loading');
   await page.evaluate(() => document.getElementById('grow').click());
   const warmFailure = await waitFor(s => !s.busy);
-  assert.equal(warmFailure.state, 'failed', JSON.stringify(warmFailure));
-  assert.match(warmFailure.message, /尺寸或视口发生变化/);
+  assert.equal(warmFailure.state, 'complete', JSON.stringify(warmFailure));
+  assert.equal(warmFailure.metrics.retries, 1);
   await assertRestored(before, position);
-  console.log('PASS region bounds and growth during warm-up: clear failure and full restoration');
+  console.log('PASS invalid bounds rejected; one-time scope growth retries and restores');
 
   // Cancel with an actual live offscreen document, then recover with a new job.
   const cancelledJob = await capture('full');

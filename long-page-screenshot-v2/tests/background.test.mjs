@@ -42,3 +42,32 @@ test("startup close failure does not poison ready; new job completes and reveals
   assert.equal(shown, 8);
   assert.equal((await send({ type: "SHOW", id: "old" })).ok, false);
 });
+
+const validation = source.slice(source.indexOf('function validateView'), source.indexOf('async function scroll'));
+const validationContext = { sameViewport, regionFromEdges };
+vm.runInNewContext(validation, validationContext);
+
+test('Region tolerates unrelated document dimensions but rejects viewport and local scope changes', () => {
+  const page = { width: 900, height: 4000, innerWidth: 900, innerHeight: 700, clientWidth: 900, clientHeight: 700, dpr: 1, visualScale: 1 };
+  const region = { x: 80, y: 40, width: 500, height: 2400 };
+  const s = { mode: 'region', viewport: page, selectionPage: page, region, scope: 'stable-content' };
+  const moved = { ...page, width: 1400, height: 9000, region: { ...region, y: 220 }, scope: s.scope };
+  assert.doesNotThrow(() => validationContext.validateView(s, moved));
+  assert.throws(() => validationContext.validateView(s, { ...moved, dpr: 2 }), /视口或缩放/);
+  assert.throws(() => validationContext.validateView(s, { ...moved, scope: 'replaced-content' }), error => error.layout === true);
+  assert.throws(() => validationContext.validateView(s, { ...moved, region: { ...region, height: 2500 } }), /所选内容本身持续变化/);
+  assert.throws(() => validationContext.validateView({ ...s, mode: 'full' }, moved), /页面宽度/);
+});
+
+test('rigid translation maps actual scroll coverage into the original canvas coordinates', () => {
+  const region = { x: 80, y: 40, width: 1100, height: 2400 };
+  const s = { mode: 'region', region };
+  const actual = { x: 480, y: 1620, clientWidth: 900, clientHeight: 700, region: { ...region, x: 140, y: 220 } };
+  const normalized = validationContext.relativeView(s, actual);
+  assert.equal(normalized.x, 420); assert.equal(normalized.y, 1440);
+  const tile = visibleTile(region, normalized, 980, 1440);
+  assert.equal(tile.right, 1180); assert.equal(tile.bottom, 2140);
+  // Sampling from the actual bitmap stays at the same local offset after rebase.
+  assert.equal(tile.x - normalized.x, (tile.x + 60) - actual.x);
+  assert.equal(tile.y - normalized.y, (tile.y + 180) - actual.y);
+});
