@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { regionFromEdges, outputGeometry, sameViewport } from "../capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "../capture/planner.js";
+import { overlapCSS } from "../capture/visual.js";
 const source = (await readFile(new URL("../background.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
 test("startup close failure does not poison ready; new job completes and reveals actual download", async () => {
@@ -15,6 +16,8 @@ test("startup close failure does not poison ready; new job completes and reveals
       onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => {
         events.push(m.type);
         if (m.type === "OPEN") return { ok: true, ...outputGeometry(m.region, m.view, { width: 800, height: 600 }, m.output) };
+        if (m.type === "FULL_FRAME") return { ok: true, accepted: true, canonicalY: 0, novelTop: 0, end: 600, right: 800 };
+        if (m.type === "FULL_FINALIZE") return { ok: true, width: 800, height: 600 };
         return { ok: true, url: "blob:test" };
       } },
     storage: { session: { get: async () => ({}), set: async data => { saved = data.status; } } },
@@ -26,7 +29,7 @@ test("startup close failure does not poison ready; new job completes and reveals
     downloads: { download: async options => { assert.doesNotMatch(options.filename, /part-/); return 8; },
       search: async () => [{ id: 8, state: "complete", filename: "/custom/chosen/result.png", fileSize: 42 }], cancel: async () => {}, show: async id => { shown = id; } }
   };
-  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, setTimeout, setInterval, clearInterval });
+  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, overlapCSS, setTimeout, setInterval, clearInterval });
   const send = m => new Promise(resolve => listener({ target: "background", ...m }, { id: "test", url: "extension://popup.html" }, resolve));
   assert.equal((await send({ type: "STATUS" })).ok, true);
   assert.equal((await send({ type: "START", mode: "full" })).ok, true);
@@ -78,4 +81,31 @@ test('rigid translation maps actual scroll coverage into the original canvas coo
   // Sampling from the actual bitmap stays at the same local offset after rebase.
   assert.equal(tile.x - normalized.x, (tile.x + 60) - actual.x);
   assert.equal(tile.y - normalized.y, (tile.y + 180) - actual.y);
+});
+
+test('horizontal columns use the successfully repositioned visual band after recovery', async () => {
+  const moves = [], frames = [];
+  const view = { x: 0, y: 0, width: 1600, height: 1000, clientWidth: 800, clientHeight: 600 };
+  const s = { full: { end: 1000 }, region: { width: 1600 }, metrics: { captures: 1 }, frames: 0 };
+  let rejects = 0;
+  const context = { overlapCSS, MAX_STEPS, bottomQuiescence: async () => true,
+    scroll: async (s, x, y) => { const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current; },
+    extendEnd: async () => {}, capture: async (s, view) => { s.metrics.captures++; return { view, dataUrl: 'data:' }; },
+    status: async () => {}, request: async (s, target, type, m) => {
+      if (type !== 'FULL_FRAME') return {};
+      if (m.firstColumn && s.frames >= 2 && rejects < 2) {
+        rejects++; return { accepted: false, visual: { result: 'low-information' } };
+      }
+      frames.push(m);
+      return { accepted: true, canonicalY: m.view.y, novelTop: s.frames < 2 ? 0 : 600,
+        end: Math.min(1000, m.view.y + 600), right: m.x + 800 };
+    } };
+  vm.runInNewContext(source.slice(source.indexOf('function recordVisual'), source.indexOf('async function saveImage')), context);
+  await context.captureFull(s, view, 'data:');
+  assert.equal(rejects, 2);
+  const recovered = frames.findIndex(m => m.firstColumn && m.view.y === 280);
+  assert.ok(recovered > 0);
+  assert.equal(frames[recovered + 1].view.y, 280);
+  assert.equal(frames[recovered + 1].x, 800);
+  assert.equal(s.full.visual.visualFailures, 0);
 });

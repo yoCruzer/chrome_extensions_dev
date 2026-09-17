@@ -1,4 +1,5 @@
 import { outputGeometry, drawGeometry } from "./capture/geometry.js";
+import { VISUAL, overlapCSS, matchVertical } from "./capture/visual.js";
 
 let session;
 let queue = Promise.resolve();
@@ -37,6 +38,45 @@ async function decode(dataUrl) {
   return createImageBitmap(blob);
 }
 
+// Read a bounded strip directly from the bitmap in target-local CSS coordinates.
+function strip(bitmap, view, tail, from = 0) {
+  const width = Math.min(VISUAL.maxWidth, Math.max(12, Math.floor(view.clientWidth / VISUAL.sampleX)));
+  const height = Math.floor(view.clientHeight);
+  const rows = Math.min(height, Math.ceil(overlapCSS(height) + 2 * VISUAL.radius + VISUAL.rows));
+  const start = tail ? height - rows : Math.max(0, Math.min(height - rows, Math.floor(from)));
+  const canvas = new OffscreenCanvas(width, rows);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const sx = bitmap.width / view.innerWidth, sy = bitmap.height / view.innerHeight;
+  context.drawImage(bitmap, (view.viewportRect?.left || 0) * sx,
+    ((view.viewportRect?.top || 0) + start) * sy, view.clientWidth * sx, rows * sy, 0, 0, width, rows);
+  const pixels = context.getImageData(0, 0, width, rows).data;
+  const data = new Float32Array(width * rows), colors = new Uint8Array(width * rows * 3);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = (pixels[i * 4] * 77 + pixels[i * 4 + 1] * 150 + pixels[i * 4 + 2] * 29) / 256;
+    colors[i * 3] = pixels[i * 4];
+    colors[i * 3 + 1] = pixels[i * 4 + 1];
+    colors[i * 3 + 2] = pixels[i * 4 + 2];
+  }
+  canvas.width = canvas.height = 1;
+  return { width, height, start, data, colors };
+}
+
+function resizeCanvas(height) {
+  if (height === session.region.height) return session.scale;
+  const region = { ...session.region, height };
+  const scale = outputGeometry(region, session.view, { width: session.bitmapWidth, height: session.bitmapHeight }, session.output);
+  // Never upscale previously committed pixels when a canonical image is shorter.
+  const ratio = Math.min(scale.scaleY, session.scale.scaleY);
+  Object.assign(scale, { scaleX: ratio, scaleY: ratio, width: Math.round(region.width * ratio), height: Math.round(height * ratio) });
+  const canvas = new OffscreenCanvas(scale.width, scale.height);
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("无法扩展截图画布。");
+  context.drawImage(session.canvas, 0, 0, scale.width, session.canvas.height * ratio / session.scale.scaleY);
+  session.canvas.width = session.canvas.height = 1;
+  Object.assign(session, { canvas, context, scale, region });
+  return scale;
+}
+
 async function handle(m) {
   if (m.type === "CLOSE") {
     if (session?.id === m.id) closeSession();
@@ -63,16 +103,44 @@ async function handle(m) {
     return {};
   }
   if (m.type === "EXTEND") {
-    if (!session.canvas || m.region.height < session.region.height || m.region.width !== session.region.width) throw new Error("无效的画布扩展。");
-    const scale = outputGeometry(m.region, session.view, { width: session.bitmapWidth, height: session.bitmapHeight }, session.output);
-    const canvas = new OffscreenCanvas(scale.width, scale.height);
-    const context = canvas.getContext("2d", { alpha: false });
-    if (!context) throw new Error("无法扩展截图画布。");
-    context.drawImage(session.canvas, 0, 0, scale.width, Math.round(session.region.height * scale.scaleY));
-    session.canvas.width = session.canvas.height = 1;
-    Object.assign(session, { canvas, context, scale, region: m.region });
-    return scale;
+    if (!session.canvas || m.region.width !== session.region.width) throw new Error("无效的画布扩展。");
+    return resizeCanvas(Math.max(m.region.height, session.region.height));
   }
+  if (m.type === "FULL_FRAME") {
+    if (m.firstColumn && !session.previous && Math.abs(m.view.y) > 0.01) throw new Error("页面未到达顶部，已停止以免遗漏内容。");
+    if (m.view.x > m.x + 0.01 || m.view.x + m.view.clientWidth <= m.x) throw new Error("页面未到达所需横向位置，已停止以免遗漏内容。");
+    const bitmap = await decode(m.dataUrl);
+    try {
+      if (bitmap.width !== session.bitmapWidth || bitmap.height !== session.bitmapHeight) throw new Error("截图尺寸已变化，请保持窗口和缩放不变。");
+      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual;
+      if (m.firstColumn && session.previous) {
+        const expected = m.view.y - session.previous.documentY;
+        const current = strip(bitmap, m.view, false, session.previous.strip.start - Math.max(1, expected - VISUAL.radius));
+        if (!m.uncertain) visual = matchVertical(session.previous.strip, current, expected, true);
+        if (!visual || visual.result !== 'matched' || visual.correction !== 0) {
+          visual = { ...matchVertical(session.previous.strip, current, expected), path: 'recovery' };
+        } else visual.path = 'fast';
+        if (visual.result !== 'matched') return { accepted: false, visual };
+        canonicalY = session.previous.canonicalY + visual.matchedOffset;
+        novelTop = session.previous.end;
+      }
+      const localBottom = Math.min(m.view.clientHeight, m.view.height - m.view.y);
+      const end = canonicalY + localBottom;
+      if (end <= novelTop || canonicalY > novelTop + 0.01) return { accepted: false, visual: { ...visual, result: 'failed' } };
+      if (end > session.region.height) resizeCanvas(end);
+      const rect = { x: m.x, right: Math.min(session.region.width, m.view.x + m.view.clientWidth), y: novelTop, bottom: end };
+      const d = drawGeometry(session.region, { ...m.view, y: canonicalY }, rect, session.scale, 0);
+      session.context.drawImage(bitmap, d.sx, d.sy, d.sw, d.sh, d.dx, d.dy, d.dw, d.dh);
+      if (m.firstColumn) session.previous = { strip: strip(bitmap, m.view, true), canonicalY, end, documentY: m.view.y };
+      session.canonicalEnd = end;
+      return { accepted: true, canonicalY, novelTop, end, right: rect.right, visual };
+    } finally { bitmap.close(); }
+  }
+  if (m.type === "FULL_FINALIZE") {
+    session.previous = null;
+    return resizeCanvas(session.canonicalEnd);
+  }
+
   if (m.type === "FRAME") {
     if (!session.context || !session.canvas) throw new Error("拼图分片尚未创建。");
     const bitmap = await decode(m.dataUrl);

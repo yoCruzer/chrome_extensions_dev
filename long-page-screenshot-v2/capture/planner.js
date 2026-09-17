@@ -17,7 +17,7 @@ export function visibleTile(region, view, x, y, bandBottom) {
 export const MAX_END_EXTENSIONS = 12;
 export function adaptiveEnd(state, height, viewport) {
   state.maxObservedHeight = Math.max(state.maxObservedHeight, height);
-  if (height < state.end) throw Object.assign(new Error("页面内容缩短，需要重新截图。"), { layout: true, reasonCode: "FULL_EXTENT_SHRANK" });
+  if (height < state.end) { state.end = height; state.bottomStableSamples = 0; return true; }
   if (height === state.end) return false;
   if (height > Math.max(state.initialHeight * 2, state.initialHeight + viewport * 4) || state.endExtensions >= MAX_END_EXTENSIONS) {
     throw Object.assign(new Error("页面持续增长，可能是无限滚动；请改用选择区域。"), { reasonCode: "FULL_GROWTH_LIMIT" });

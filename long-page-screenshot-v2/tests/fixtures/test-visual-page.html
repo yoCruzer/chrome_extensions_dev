@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8"><title>Visual continuity</title>
+<style>html{overflow-anchor:none}body{margin:0}#layout{position:relative;width:900px}canvas{display:block}#island{position:absolute;left:0;top:0;width:180px;height:5000px;pointer-events:none}#witness{display:block;width:40px;height:20px}#spacer{height:0}</style>
+<div id="spacer"></div><div id="layout"><canvas id="article" width="900" height="3200"></canvas><aside id="island"><span id="witness"></span><img width="100" height="40" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='40'%3E%3Crect width='100' height='40' fill='gray'/%3E%3C/svg%3E"></aside></div>
+<script>
+const kind=new URLSearchParams(location.search).get('kind')||'static';
+const c=document.querySelector('canvas'),ctx=c.getContext('2d');
+function paint(seed=0){
+ const image=ctx.createImageData(c.width,c.height);
+ for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++){
+  const i=(y*c.width+x)*4;
+  const v=kind==='low'&&(x<420||x>=450)?255:kind==='ambiguous'?((y%16)<8?40:220):((Math.imul(y+17+seed,7321)^Math.imul(Math.floor(x/12)+19,y+731+seed))>>>0)%251;
+  image.data[i]=v;image.data[i+1]=v;image.data[i+2]=v;image.data[i+3]=255;
+ }ctx.putImageData(image,0,0);
+ if(!['low','ambiguous'].includes(kind))for(const [text,y] of [['TOP',30],['MIDDLE',1600],['BOTTOM',3160]]){ctx.fillStyle='#ff0080';ctx.font='20px monospace';ctx.fillText(text,400,y)}
+}
+if(!['github','sidebar'].includes(kind))document.querySelector('#island').hidden=true;
+paint();window.reference=c.toDataURL().split(',')[1];
+// A normal-flow leaf witness moves while only a minority overlay changes pixels.
+const witness=document.querySelector('#witness');
+document.querySelector('#island').style.height='3200px';
+if(['github','sidebar'].includes(kind)) {document.querySelector('#island').style.position='relative';document.querySelector('#island').style.height='0px';document.querySelector('#island').prepend(witness);document.querySelector('#layout').prepend(document.querySelector('#island'))}
+let changed=false;
+addEventListener('scroll',()=>{
+ if(changed||scrollY<100)return;changed=true;
+ if(kind==='github'||kind==='global')document.querySelector('#spacer').style.height=(kind==='github'?45:80)+'px';
+ if(kind==='sidebar'){document.querySelector('#island').style.transform='translateY(20.617px)';ctx.fillStyle='#d09030';ctx.fillRect(0,0,180,c.height)}
+ if(kind==='ad'){ctx.fillStyle='#f0c020';ctx.fillRect(0,0,240,c.height)}
+ if(kind==='islands'){ctx.fillStyle='#30c060';ctx.fillRect(0,0,100,c.height);ctx.fillRect(800,0,100,c.height)}
+ if(kind==='unrelated')paint(987654);
+});
+</script>

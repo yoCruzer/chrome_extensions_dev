@@ -23,25 +23,21 @@ export async function testProof({page,worker,capture,waitFor,PNG}) {
   await capture('full','css');
   await waitFor(s=>s.state==='capturing'&&s.frames>=3);
   if(['insert','repeated'].includes(kind))await page.evaluate(()=>insert());
-  else if(kind==='removed')await page.evaluate(()=>document.querySelector('#article > canvas').replaceWith(document.querySelector('#article > canvas').cloneNode(true)));
+  else if(kind==='removed')await page.evaluate(()=>{const old=document.querySelector('#article > canvas'),copy=old.cloneNode(true);copy.getContext('2d').drawImage(old,0,0);old.replaceWith(copy)});
   else if(!['first-frame','first-shrink'].includes(kind))await page.evaluate(kind=>mutate(kind),kind);
-  if(['repeated','removed'].includes(kind)){
-   await waitFor(s=>s.attempt===2&&s.state==='capturing'&&s.frames>=3);
-   await page.evaluate(kind=>kind==='repeated'?insert():document.querySelector('#article > canvas').remove(),kind);
-  }
+  if(kind==='repeated')await page.evaluate(()=>insert());
   const result=await waitFor(s=>!s.busy),d=result.diagnostics.fullProof;
   assert.ok(d.trace.filter(t=>t.frameCount===0).every(t=>t.committedEnd===0),'planned view never commits pixels');
-  if(['repeated','removed'].includes(kind)){
-   assert.equal(result.state,'failed');assert.equal(result.reasonCode,'FULL_REFLOW');assert.equal(result.result,undefined);
-   assert.equal(d.trigger,kind==='removed'?'WITNESS_REMOVED':'WITNESS_MOVED');
-   assert.equal(result.attempt,2);
+  if(['insert','repeated'].includes(kind)){
+   assert.equal(result.state,'failed');assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');assert.equal(result.result,undefined);
+   assert.equal(d.trigger,'WITNESS_MOVED');
+   assert.equal(result.attempt,1);
   }else{
-   await verify(result);assert.equal(result.metrics.retries,kind==='insert'?1:0);
+   await verify(result);assert.equal(result.metrics.retries,0);
    if(kind==='first-frame'){assert.equal(d.counters.baselineRebasesBeforeFirstFrame,1);assert.equal(result.attempt,1)}
    else if(kind==='first-shrink'){assert.equal(result.attempt,1);assert.equal(result.result.height,3900)}
-   else if(kind==='insert'){
-    assert.ok(d.trace.some(t=>t.trigger==='WITNESS_MOVED'&&t.delta.dy===200));
-   }else{assert.ok(d.counters.dirtyMutations>0);assert.ok(d.counters.harmlessAfterGeometryCheck>0)}
+   else if(kind==='removed'){assert.ok(d.counters.witnessRemoved>0);assert.equal(result.attempt,1)}
+   else{assert.ok(d.counters.dirtyMutations>0);assert.ok(d.counters.harmlessAfterGeometryCheck>0)}
   }
   assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);
   console.log('PASS proof',kind,'PNG rows/markers/seams or fail-closed verified',JSON.stringify(d.counters));

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testVisual } from "./visual.mjs";
 import { testFullNested } from "./full-nested.mjs";
 import { testProof } from "./proof.mjs";
 import { testDiagnostics } from "./diagnostics.mjs";
@@ -29,13 +30,14 @@ const dynamicFixture = await readFile(resolve(extension, "tests/fixtures/test-dy
 const reliabilityFixture = process.env.RELIABILITY_ONLY ? await readFile(resolve(extension, `tests/fixtures/test-${process.env.RELIABILITY_ONLY}-like-page.html`), "utf8") : null;
 const nestedFixture = (process.env.NESTED_ONLY || process.env.FULL_NESTED_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-nested-page.html"), "utf8") : null;
 const adaptiveFixture = (process.env.ADAPTIVE_ONLY || process.env.DIAGNOSTICS_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-adaptive-page.html"), "utf8") : null;
+const visualFixture = process.env.VISUAL_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-visual-page.html"), "utf8") : null;
 const proofFixture = process.env.PROOF_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-proof-page.html"), "utf8") : null;
 const server = createServer((req, res) => {
   if (req.url.startsWith('/lazy.svg')) {
     res.setHeader('Content-Type','image/svg+xml');
     setTimeout(()=>res.end('<svg xmlns="http://www.w3.org/2000/svg" width="900" height="20"><rect width="900" height="20" fill="#e000e0"/></svg>'),600);
     return;
-  } res.setHeader("Content-Type", "text/html"); res.end(proofFixture || adaptiveFixture || nestedFixture || reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
+  } res.setHeader("Content-Type", "text/html"); res.end(visualFixture || proofFixture || adaptiveFixture || nestedFixture || reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
   ...(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: "chromium" }),
@@ -94,7 +96,9 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.FULL_NESTED_ONLY) {
+  if (process.env.VISUAL_ONLY) {
+    await testVisual({ page, worker, waitFor, capture, PNG });
+  } else if (process.env.FULL_NESTED_ONLY) {
     await testFullNested({ page, worker, message, waitFor, capture, PNG, browserCDP });
   } else if (process.env.PROOF_ONLY) {
     await testProof({ page, worker, waitFor, capture, PNG });
@@ -187,6 +191,18 @@ try {
       assert.equal(image.width, 500 * ratio); assert.equal(image.height, 1600 * ratio);
       for (let y = 0; y < image.height; y++) assert.equal(image.data[(y * image.width + 10) * 4 + 2], 97);
       console.log("PASS native Retina CSS output", output, image.width, image.height);
+    }
+    await page.evaluate(() => { document.querySelector("canvas").style.width = "1500px"; document.querySelector("canvas").style.height = "1800px"; });
+    for (const output of ["css", "device"]) {
+      await capture("full", output);
+      const result = await waitFor(s => !s.busy);
+      assert.equal(result.state, "complete", JSON.stringify(result));
+      const png = PNG.sync.read(await readFile(result.result.filename));
+      const ratio = output === "device" ? Number(process.env.NATIVE_DPR) : 1;
+      assert.equal(png.width, 1500 * ratio); assert.equal(png.height, 1800 * ratio);
+      for (let y = 0; y < png.height; y++) assert.equal(png.data[(y * png.width + 100) * 4 + 2], 97);
+      assert.ok(result.diagnostics.visual.visualChecks > 0);
+      console.log("PASS native Retina Full Page visual", output, png.width, png.height);
     }
   } else if (process.env.SITE_URL) {
     await page.screenshot({ path: join(root, "page-before.png") });
@@ -318,10 +334,16 @@ try {
   });
   await capture("full");
   const lazy = await waitFor(s => !s.busy);
-  assert.equal(lazy.state, "complete", JSON.stringify(lazy));
+  // Rescaling all previously painted content has no translational overlap.
+  assert.equal(lazy.state, "failed", JSON.stringify(lazy));
+  assert.equal(lazy.reasonCode, "VISUAL_CONTINUITY_FAILED");
+  assert.equal(lazy.result, undefined);
+  await capture("full");
+  const stableGrowth = await waitFor(s => !s.busy);
+  assert.equal(stableGrowth.state, "complete", JSON.stringify(stableGrowth));
   const [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
   assert.equal(PNG.sync.read(await readFile(lazyFile.filename)).height, 2800);
-  console.log("PASS lazy layout growth: 1800 → 2800 CSS pixels, final bottom included");
+  console.log("PASS global content rescale: bounded visual failure, stable recapture includes final bottom");
 
   await capture("full");
   await waitFor(s => s.state === "capturing");

@@ -23,19 +23,16 @@ export async function testAdaptive({page,capture,waitFor,worker,PNG}) {
   if(mode==='multiple')await page.evaluate(()=>{setTimeout(grow,150);armBottomGrowth(2)});
   if(mode==='infinite')await page.evaluate(()=>armBottomGrowth(100));
   if(mode==='reflow'||mode==='repeated')await page.evaluate(()=>appendBlock('INSERTED ABOVE',true));
-  if(mode==='repeated'){
-   await waitFor(s=>s.attempt===2&&s.state==='capturing'&&s.frames>=1);
-   await page.evaluate(()=>appendBlock('SECOND REFLOW',true));
-  }
+  if(mode==='repeated')await page.evaluate(()=>appendBlock('SECOND REFLOW',true));
   const result=await waitFor(s=>!s.busy);
-  if(mode==='infinite'||mode==='repeated'){
+  if(['infinite','reflow','repeated'].includes(mode)){
    assert.equal(result.state,'failed',JSON.stringify(result));assert.equal(result.parts,0);assert.equal(result.result,undefined);
-   assert.equal(result.reasonCode,mode==='infinite'?'FULL_GROWTH_LIMIT':'FULL_REFLOW');
+   assert.equal(result.reasonCode,mode==='infinite'?'FULL_GROWTH_LIMIT':'VISUAL_CONTINUITY_FAILED');
    assert.ok(result.diagnostics.fullPageRestarts<=1);
   }else{
    await verify(result);
-   assert.equal(result.diagnostics.fullPageRestarts,mode==='reflow'?1:0);
-   assert.equal(result.metrics.retries,mode==='reflow'?1:0);
+   assert.equal(result.diagnostics.fullPageRestarts,0);
+   assert.equal(result.metrics.retries,0);
    if(mode==='once'||mode==='multiple'){
     assert.ok(result.diagnostics.endExtensions>=(mode==='once'?1:3));
     assert.ok(result.diagnostics.maxObservedHeight>result.diagnostics.initialHeight);

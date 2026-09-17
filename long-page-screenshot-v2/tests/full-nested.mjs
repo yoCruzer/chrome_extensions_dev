@@ -32,7 +32,7 @@ export async function testFullNested({page,worker,message,capture,waitFor,PNG,br
   assert.equal(result.diagnostics.targetKind,'element');
   assert.equal(result.diagnostics.bottomStableSamples,4);
  };
- for(const mode of ['static','first-resize','growth','resize','reflow','repeated']){
+ for(const mode of ['static','first-resize','growth','resize','visual-shift','reflow','repeated']){
   await setup();
   if(mode==='first-resize')await worker.evaluate(()=>{
    const original=chrome.tabs.captureVisibleTab.bind(chrome.tabs);
@@ -46,19 +46,19 @@ export async function testFullNested({page,worker,message,capture,waitFor,PNG,br
   await capture('full','css');
   await waitFor(s=>s.state==='capturing'&&s.frames>=2);
   if(mode==='growth')await insert();
+  if(mode==='visual-shift')await page.evaluate(()=>document.querySelector('#conversation canvas').style.marginTop='45px');
   if(mode==='resize')await page.evaluate(()=>document.getElementById('conversation').style.height='500px');
   if(['reflow','repeated'].includes(mode))await insert(true);
-  if(mode==='repeated'){
-   await waitFor(s=>s.state==='capturing'&&s.attempt===2&&s.frames>=2);await insert(true);
-  }
+  if(mode==='repeated')await insert(true);
   const result=await waitFor(s=>!s.busy);
-  if(mode==='repeated'){
-   assert.equal(result.state,'failed');assert.equal(result.reasonCode,'FULL_REFLOW');assert.equal(result.result,undefined);
+  if(['reflow','repeated'].includes(mode)){
+   assert.equal(result.state,'failed');assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');assert.equal(result.result,undefined);
    assert.equal(result.diagnostics.fullProof.trigger,'WITNESS_MOVED');assert.deepEqual(await position(),[0,317]);
   }else{
    await verify(result);
-   assert.equal(result.metrics.retries,['resize','reflow'].includes(mode)?1:0);
+   assert.equal(result.metrics.retries,mode==='resize'?1:0);
    if(mode==='first-resize')assert.equal(result.diagnostics.fullProof.counters.baselineRebasesBeforeFirstFrame,1);
+   if(mode==='visual-shift')assert.ok(result.diagnostics.visual.trace.some(t=>t.correction===-45));
    if(mode==='growth'){assert.equal(result.diagnostics.maxObservedHeight,5280);assert.equal(result.diagnostics.endExtensions,1)}
   }
   assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);

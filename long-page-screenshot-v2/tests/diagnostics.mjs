@@ -11,8 +11,6 @@ export async function testDiagnostics({page,capture,waitFor,worker,PNG}) {
     await waitFor(s=>s.state==='capturing'&&s.frames>=1);
     if(mode==='mutation-failure') {
       await page.evaluate(()=>appendBlock('INSERTED ABOVE',true));
-      await waitFor(s=>s.attempt===2&&s.state==='capturing'&&s.frames>=1);
-      await page.evaluate(()=>appendBlock('SECOND REFLOW',true));
     }
     const result=await waitFor(s=>!s.busy);
     assert.equal(result.state,mode==='success'?'complete':'failed',JSON.stringify(result));
@@ -26,6 +24,7 @@ export async function testDiagnostics({page,capture,waitFor,worker,PNG}) {
     assert.equal(report.state,result.state);
     assert.equal(report.attempt,result.attempt);
     assert.deepEqual(report.diagnostics.fullProof,result.diagnostics.fullProof);
+    assert.deepEqual(report.diagnostics.visual,result.diagnostics.visual);
     assert.ok(report.diagnostics.fullProof.trace.length<=150);
     assert.ok(report.diagnostics.fullProof.counters.witnessVerifications>0);
     assert.equal(report.diagnostics.fullProof.counters.mutations,
@@ -45,11 +44,11 @@ export async function testDiagnostics({page,capture,waitFor,worker,PNG}) {
       assert.deepEqual(png.data,reference.data);
       assert.equal(result.metrics.retries,0);
     } else {
-      assert.equal(report.reasonCode,'FULL_REFLOW');
+      assert.equal(report.reasonCode,'VISUAL_CONTINUITY_FAILED');
       assert.equal(report.diagnostics.fullProof.trigger,'WITNESS_MOVED');
-      assert.equal(report.diagnostics.fullPageRestarts,1);assert.equal(result.attempt,2);
+      assert.equal(report.diagnostics.fullPageRestarts,0);assert.equal(result.attempt,1);
       assert.equal(result.result,undefined);assert.equal(result.parts,0);
-      for(const attempt of [1,2]) assert.ok(report.diagnostics.fullProof.trace.some(t=>t.attempt===attempt&&t.trigger==='WITNESS_MOVED'));
+      for(const attempt of [1]) assert.ok(report.diagnostics.fullProof.trace.some(t=>t.attempt===attempt&&t.trigger==='WITNESS_MOVED'));
       assert.ok(report.diagnostics.fullProof.trace.some(t=>t.event==='mutation-marked-dirty'));
     }
     assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);

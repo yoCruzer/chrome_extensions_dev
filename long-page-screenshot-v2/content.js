@@ -206,7 +206,7 @@
       ? "已截图内容发生变化，需要重新截图。" : messages[status.state] || "截图处理中。",
       reasonCode: /^[A-Z_]{1,64}$/.test(status.reasonCode || "") ? status.reasonCode : null,
       attempt: status.attempt || 1, metrics: numeric(status.metrics),
-      diagnostics: { ...numeric(diagnostics), fullProof: diagnostics.fullProof || null }
+      diagnostics: { ...numeric(diagnostics), fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
     }, null, 2);
   }
 
@@ -262,6 +262,7 @@
     const proof = s.fullProof, diagnostics = proofDiagnostics(s);
     const view = targetView(s);
     diagnostics.counters.witnessVerifications++;
+    let geometryUncertain = false;
     const verify = (nodes, committed) => {
       for (const [element, before] of nodes) {
         const r = element.getBoundingClientRect();
@@ -281,18 +282,21 @@
           throw Object.assign(new Error("当前帧布局变化，正在重新采样。"), { translation: true, reasonCode: "FRAME_MOVED" });
         }
         diagnostics.counters[!element.isConnected ? "witnessRemoved" : moved ? "witnessMoved" : "witnessResized"]++;
+        geometryUncertain = true;
         diagnostics.trigger = trigger;
         proofTrace(s, "dirty-verified-invalid", details);
-        proofTrace(s, "FULL_REFLOW", details);
-        throw Object.assign(new Error("已截图内容发生变化，需要重新截图。"), { layout: true, reasonCode: "FULL_REFLOW" });
+        proofTrace(s, "visual-continuity-required", details);
+        // Evidence requests visual verification; it no longer vetoes a frame.
+        if (element.isConnected) nodes.set(element, current);
+        else nodes.delete(element);
       }
     };
     // Always verify: CSS/layout changes can occur without a MutationObserver record.
     verify(proof.nodes, true);
     verify(proof.pending, false);
     if (proof.dirty) {
-      diagnostics.counters.harmlessAfterGeometryCheck += proof.dirty;
-      proofTrace(s, "dirty-verified-harmless", { dirtyMutations: proof.dirty });
+      if (!geometryUncertain) diagnostics.counters.harmlessAfterGeometryCheck += proof.dirty;
+      proofTrace(s, geometryUncertain ? "dirty-requires-visual" : "dirty-verified-harmless", { dirtyMutations: proof.dirty });
       proof.dirty = 0;
     }
     if (!watch) return;

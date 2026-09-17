@@ -158,3 +158,67 @@ Phase B 最终定向：Full Page nested 10/10，通过首帧容器 resize 不消
 合计 **12 个 Chrome 分组全部通过**，没有重跑完整矩阵。最后仅更新说明及测试结果。变更仅限 V2；没有生产 manifest/权限、其它扩展、框架或站点适配器修改。
 
 真实 GitHub/CSDN 的旧诊断只证明 mutation 命中，不证明 committed 坐标失效；本轮通过确定性 fixture 验证修正，不声称已重测用户登录态的外网网站。保留虚拟列表、iframe inner scroll、任意二维 nested、无限 feed、Shadow DOM 深层捕获限制；same-box 语义/Canvas/video 变化不是几何证明可保证的像素冻结。全绝对定位内容及多栏同等大滚动目标仍是启发式边界；必要时使用 Region 手选。终点缩短保留有界重建，独立 reasonCode 为 FULL_EXTENT_SHRANK。
+
+## Full Page Visual Continuity（2026-09-18）
+
+开发基线为最新 `origin/main` `20c7fc6b4f7c18cf27f568167096589b22dc5e50`。本节取代历史记录中 Full Page witness → FULL_REFLOW／整页重启的预期；Region 的原有预期保持不变。
+
+Matcher 独立测试覆盖精确位移、−45/−80/+20/+96 修正、sidebar/ad/双侧动态区域、无关内容、重复纹理、低信息拒绝、截断条带，以及不同彩色渐变的灰度别名。开发中先跑 matcher，再跑 visual/static/adaptive/nested/proof/diagnostics 定向组，没有中途反复运行完整矩阵。
+
+`VISUAL_ONLY=1` 使用真实 captureVisibleTab → offscreen → downloads：
+
+- static：900×3200，全部 RGBA 与独立参考图逐行一致，全部视觉修正为 0。
+- GitHub-like：滚动后 extent +45、普通流 witness +45；matcher 修正 −45，不重启，PNG 仍为原始内容高度；稳定内容 TOP/MIDDLE/BOTTOM、所有行及 seams 与参考一致。
+- CSDN-like：正常流 ASIDE 子树（SPAN/IMG）移动约 20.617px、extent 不变，左侧 20% 画面改变；共识排除少数 tiles，稳定文章区域逐像素完整。
+- ad：左侧约 27% 完全改变；islands：两侧各约 11% 改变，稳定中央内容逐像素一致。
+- global：整体下移 80px，高置信度修正 −80；全图像素与原始参考一致，不追加空白尾带。
+- transient：第二次 capture 改变画面、第三次恢复；第一次被拒绝的位图不进入画布，重采后输出逐像素正确。
+- unrelated／ambiguous／low：每例两次重试后 `VISUAL_CONTINUITY_FAILED`，无 PNG、无 offscreen 残留、恢复滚动；纯白 tiles 不计入有效共识，重复纹理不能依赖预计坐标猜测。
+
+`FULL_NESTED_ONLY=1` 增加目标内容 +45px 的视觉恢复，并保留 window.scrollY 始终为 0、目标滚动恢复 317、完整像素及 shell 排除、增长／resize／target 删除替换／worker 中断验证。
+
+旧测试语义调整有明确原因：
+
+- adaptive 的 +400px、nested 的 +480px、proof 的 +200px 与连续两次大插入超出 ±96px 模型，改为有界视觉失败，不再等待 Attempt 2。小位移的成功由新的 +45/+80 fixture 与 nested +45 fixture 覆盖。
+- 已提交 witness 移除但替代 canvas 像素相同：保留 WITNESS_REMOVED 警告，视觉连续则成功；不再把 DOM 身份本身当作致命错误。
+- basic 将整幅 canvas 从 1800 拉伸到 2800 CSS px 的变更会改变缩放，无法通过平移对齐：现在要求明确失败，然后对稳定后的页面重新截图成功。普通底部追加仍由 adaptive 的 once/multiple 覆盖。
+- diagnostics 继续点击真实「复制诊断信息」并从 Chrome clipboard 读回，新增 visual 对象一致性验证；失败为视觉失败，trace 保留 witness 数值警告。
+
+性能微基准：Node 24.19.0，225×431 条带（900px 宽／700px 高目标），预热 5 次后测量 20 次，快速路径中位数约 1.9ms（最大 4.7ms）、恢复路径约 3.9ms（最大 7.0ms）；这是纯 matcher，不包含 capture、decode、canvas 和浏览器总开销。该条带占 678,825 字节；上限 384×576×7 = 1,548,288 字节。匹配需当前条带及临时采样画布；不保存全帧历史。未测量 Chrome 总 RSS。
+
+### 最终回归与修复补验
+
+Node 24.19.0、Chrome 152.0.7977.84。只运行了一轮完整矩阵（Node + 13 个 Chrome 分组），原始日志与 `results.json` 位于本机临时目录 `visual-final-5bx2jrgd`。没有再次运行整套矩阵。
+
+完整轮发现并定向修复了两处实现边界及一处新增测试设置：
+
+1. 输出/UI：首列在恢复时后退成功，后续横向列误用了原滚动坐标。现在所有列沿用成功 band 的实际 documentY；新增独立 background 单元测试验证失败两次后的整行坐标一致。
+2. complex：纵向恒定的边框不该因为横向色差而算作有效注册信息。增加平均垂直变化量 ≥0.05，并将最终恢复后退距离设为一个有界 overlap（最多 320px）。没有放宽 tile 共识／quality／margin 阈值。增加竖直边框排除单测；真实复杂页面重新验证全部通过。
+3. 新增 Retina Full Page fixture 只设 canvas 高度，CSS auto width 随纵横比缩小；明确设置 1500px 宽度后，CSS/device 两种 Full Page 均通过。原有 Retina Region 项在完整轮已通过。
+
+| 分组 | 最终证据 |
+| --- | --- |
+| Node | 完整轮 64/64；新增横向恢复、纵向无信息边框两个边界单测及 background/offscreen 定向验证全部通过（总计 66 个独立测试） |
+| Chrome basic | 10337 行横纵像素、单 PNG、Region 选区、125% zoom、模拟 DPR、cancel/stale、全局缩放失败后稳定重采、worker 中断、下载失败恢复 |
+| output/UI | Auto/CSS/75/50/device、面板/路径/show、取消、26000px Auto→16384px、超限预检；修复后定向组全部通过 |
+| dynamic Region | 平移、一次 resize、两次 reflow 失败、锚点丢失、环境诊断 |
+| nested Region | 同屏/跨屏完整像素、window 不动、resize、cancel/remove/replace、worker 恢复 |
+| CSDN-like Region | 同屏/跨屏、client/DPR 非致命变化、resize、窗口/zoom/visualScale/tab 环境失败 |
+| Chat-like Region | 同屏/跨屏完整像素与 marker、sticky 布局保持 |
+| complex | 18 lazy images、定时增长、底部、fixed/sticky 恢复、Region 边框连续、数字范围、cancel/stale/export/offscreen 故障；修复后全部通过 |
+| Full Page adaptive | 6 场景：static、once、multiple、两类超范围插入有界失败、infinite growth 保护 |
+| Full Page proof | 12 场景：harmless mutations、首帧 rebase/shrink、大位移失败、witness 移除但视觉连续成功 |
+| Full Page nested | 11 场景：完整像素/目标恢复、增长、resize、+45px 视觉修正、大位移失败、cancel/remove/replace/worker |
+| Visual continuity | 10 场景：static、GitHub +45、CSDN sidebar、ad、islands、global +80、transient retry、unrelated、ambiguous、low-information；成功图逐行比较稳定区域，失败无 PNG |
+| diagnostics | 2 场景：成功/失败，真实 clipboard 读回，visual 与 fullProof 内容一致、隐私与清理断言 |
+| Retina | 原生 2× Region 各输出模式及 downloads.show；新增 Full Page CSS 1500×1800、device 3000×3600，视觉检查通过 |
+
+定向修复日志：`/tmp/visual-target-complex.log`、`/tmp/visual-target-output.log`、`/tmp/visual-target-retina.log`。最终视觉 fixture 复验：`/tmp/visual-final-fixtures.log`，低信息场景为大面积白色加一条窄纹理，确认不足 3 个有效 tiles 时拒绝而非利用白色猜测。瞬时变化 fixture 在注入绘制变更后等待两次 requestAnimationFrame，确保 captureVisibleTab 真正取得变更画面，避免把 compositor 尚未刷新的旧帧误当作一次重试。资源审查另外释放调用者对首帧 data URL 的多余引用，并直接复制 RGB 通道避免逐像素临时 typed-array view。
+
+变更仅限以下 19 个 V2 文件；没有修改生产 manifest、权限或其它扩展，没有提交临时 profile、PNG、debug dump：
+
+- Runtime：`background.js`、`content.js`、`offscreen.js`、`capture/planner.js`、`capture/visual.js`。
+- Tests：`tests/adaptive.mjs`、`tests/adaptive.test.mjs`、`tests/background.test.mjs`、`tests/browser.mjs`、`tests/diagnostics.mjs`、`tests/diagnostics.test.mjs`、`tests/full-nested.mjs`、`tests/offscreen.test.mjs`、`tests/proof.mjs`、`tests/visual.mjs`、`tests/visual.test.mjs`、`tests/fixtures/test-visual-page.html`。
+- Documentation：`README.md`、`TESTING.md`。
+
+剩余限制以 README 的 Visual Continuity 一节为准：有界 1D 整数 CSS 注册、低信息/重复内容/大范围变化安全失败；不追溯更新已捕获前缀，不保证动态 outlier 自身时序一致；宽页面以首列注册每个 band；不支持虚拟列表、iframe 内独立滚动或任意二维变形。没有重测真实登录态 GitHub/CSDN，也没有测量浏览器总 RSS。

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { outputGeometry, drawGeometry } from "../capture/geometry.js";
 
-const source = (await readFile(new URL("../offscreen.js", import.meta.url), "utf8")).replace(/^import .*;\n/, "");
+const source = (await readFile(new URL("../offscreen.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 function harness() {
   let listener, pagehide, nextURL = 0, failDecode = false, failEncode = false;
   const canvases = [], bitmaps = [], urls = new Set();

@@ -1,5 +1,6 @@
 import { regionFromEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "./capture/planner.js";
+import { overlapCSS } from "./capture/visual.js";
 
 let active = null;
 let lastStatus = { state: "idle", message: "准备就绪" };
@@ -262,6 +263,70 @@ async function bottomQuiescence(s) {
   throw Object.assign(new Error("页面底部仍在加载，请稍后重试或改用选择区域。"), { reasonCode: "BOTTOM_NOT_QUIESCENT" });
 }
 
+function recordVisual(s, match, retry) {
+  if (!match) return;
+  const d = s.full.visual;
+  d.visualChecks++;
+  if (retry) d.visualRecoveryRetries++;
+  if (match.result === 'matched') {
+    if (match.path === 'fast' && !retry) d.visualFastPath++;
+    else d.visualRecoveries++;
+  } else {
+    if (match.result === 'ambiguous') d.ambiguousMatches++;
+    if (match.result === 'low-information') d.lowInformationRejects++;
+  }
+  d.trace.push({ ...match, frame: s.frames, retry });
+  if (d.trace.length > 150) d.trace.shift();
+}
+
+async function captureFull(s, view, dataUrl) {
+  s.full.visual ||= { visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
+    visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0, trace: [] };
+  let documentBottom = 0, nextY = 0;
+  while (true) {
+    if (documentBottom >= s.full.end - 0.01 && await bottomQuiescence(s)) break;
+    let x = 0, band;
+    while (x < s.region.width - 0.01) {
+      for (let retry = 0; retry < 3; retry++) {
+        if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
+        if (!dataUrl) {
+          // Retry twice: settle at the same position, then back up by one bounded
+          // overlap to provide more shared pixels. Never restart the whole image.
+          const y = band?.documentY ?? (retry === 2 ? Math.max(0, nextY - overlapCSS(view.clientHeight)) : nextY);
+          view = await scroll(s, x, y);
+          await extendEnd(s, view);
+          ({ view, dataUrl } = await capture(s, view));
+        }
+        if (band && view.y !== band.documentY) throw Object.assign(new Error("横向截图时页面发生位移，请重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
+        const counters = s.fullProofDiagnostics?.counters;
+        const evidence = (counters?.witnessMoved || 0) + (counters?.witnessResized || 0) + (counters?.witnessRemoved || 0);
+        const result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
+          uncertain: retry > 0 || evidence !== (s.visualEvidence || 0) || view.height !== s.visualHeight,
+          firstColumn: x === 0, canonicalY: band?.canonicalY, novelTop: band?.novelTop });
+        dataUrl = null;
+        recordVisual(s, result.visual, retry);
+        if (!result.accepted) {
+          if (retry < 2) continue;
+          s.full.visual.visualFailures++;
+          throw Object.assign(new Error("无法可靠对齐相邻截图，请等待页面稳定后重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
+        }
+        s.visualEvidence = evidence;
+        s.visualHeight = view.height;
+        band ||= { ...result, documentY: view.y };
+        s.frames++;
+        await request(s, "content", "FULL_COMMIT", { rect: { x, y: view.y + result.novelTop - result.canonicalY,
+          right: result.right, bottom: Math.min(view.height, view.y + view.clientHeight) } });
+        x = result.right;
+        documentBottom = Math.min(view.height, view.y + view.clientHeight);
+        await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(documentBottom / s.full.end * 100))}% · ${s.frames} 帧`);
+        break;
+      }
+    }
+    nextY = documentBottom - overlapCSS(view.clientHeight);
+  }
+  s.outputSize = await request(s, "offscreen", "FULL_FINALIZE");
+}
+
 async function saveImage(s, url) {
   await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
   check(s);
@@ -360,31 +425,35 @@ async function run(s) {
         const scale = await request(s, "offscreen", "OPEN", { region: s.region, view: relativeView(s, view), dataUrl, output: s.output });
         s.outputSize = scale;
         await request(s, "offscreen", "PART", { start: 0, height: scale.height });
-        let y = s.region.y;
-        while (true) {
-          if (y >= s.region.y + s.region.height - 0.0001) {
-            if (s.mode !== "full" || await bottomQuiescence(s)) break;
-          }
-          let x = s.region.x, bandBottom;
-          while (x < s.region.x + s.region.width - 0.0001) {
-            if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
-            if (!dataUrl) {
-              view = await scroll(s, x, y);
-              if (s.mode === "full") await extendEnd(s, view);
-              ({ view, dataUrl } = await capture(s, view));
+        if (s.mode === "full") {
+          const captureTask = captureFull(s, view, dataUrl);
+          dataUrl = null;
+          await captureTask;
+        } else {
+          let y = s.region.y;
+          while (true) {
+            if (y >= s.region.y + s.region.height - 0.0001) {
+              break;
             }
-            const tileView = relativeView(s, view);
-            const rect = visibleTile(s.region, tileView, x, y, bandBottom);
-            bandBottom = rect.bottom;
-            await request(s, "offscreen", "FRAME", { view: tileView, rect, dataUrl });
-            dataUrl = null;
-            s.frames++;
-            if (s.mode === "full") await request(s, "content", "FULL_COMMIT", { rect });
-            x = rect.right;
-            const done = (y - s.region.y) * s.region.width + (rect.bottom - y) * (x - s.region.x);
-            await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(done / (s.region.width * s.region.height) * 100))}% · ${s.frames} 帧`);
+            let x = s.region.x, bandBottom;
+            while (x < s.region.x + s.region.width - 0.0001) {
+              if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
+              if (!dataUrl) {
+                view = await scroll(s, x, y);
+                ({ view, dataUrl } = await capture(s, view));
+              }
+              const tileView = relativeView(s, view);
+              const rect = visibleTile(s.region, tileView, x, y, bandBottom);
+              bandBottom = rect.bottom;
+              await request(s, "offscreen", "FRAME", { view: tileView, rect, dataUrl });
+              dataUrl = null;
+              s.frames++;
+              x = rect.right;
+              const done = (y - s.region.y) * s.region.width + (rect.bottom - y) * (x - s.region.x);
+              await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(done / (s.region.width * s.region.height) * 100))}% · ${s.frames} 帧`);
+            }
+            y = bandBottom;
           }
-          y = bandBottom;
         }
         if (s.mode === "region") {
           await ensureVisible(s);

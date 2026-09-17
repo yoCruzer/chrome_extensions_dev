@@ -34,7 +34,7 @@
 
 - 普通页面单遍处理：滚到当前块，等待几何和可见图片稳定，立即截图并绘制，再前往下一块；不再无条件完整预滚动一遍。
 - 整页每块至少约 480 ms、区域约 240 ms 稳定等待；区域等待比较局部几何，不等待整个 document 静止。可见图片或局部几何在 5 秒内仍不稳定就有界重试／失败。截图调用间隔至少 550 ms，遵守 Chrome 限流。
-- 整页允许底部追加：扩展终点和画布，保留已捕获像素。已提交区域的几何见证显示旧坐标失效时，丢弃画布，最多从头重启一次；不会混合两次布局的帧。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
+- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除要求视觉验证，不再触发整页重启。匹配失败最多重采两次，再以 `VISUAL_CONTINUITY_FAILED` 停止且不下载 PNG。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
 - 支持横向及纵向拼接，以实际可见坐标裁剪、按绝对输出边界取整，避免累计接缝误差。
 - 页面状态面板使用 Shadow DOM。截图前隐藏，并等待两次动画帧重绘；截图后恢复，面板不进入最终 PNG。
 - 通常仅保留当前帧和一个有界画布；动态扩展时短暂保留新旧两个画布，拷贝后立即释放旧画布。Auto 扩展超出原比例预算时会下采样已有像素；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
@@ -66,11 +66,11 @@ Element Full Page 复用 Region 的 CaptureTarget、targetView、scroll restorat
 
 状态接口及 `chrome.storage.session` 中的 `status` 保留 `reasonCode`、`attempt`、`diagnostics`：环境 baseline/actual、具体差异字段、两角 connected／原始及当前 rect／resolved point／resolver mode，以及区域 before/current。例：`CAPTURE_ENV_CHANGED: innerWidth 900 -> 880`。其它代码包括 `ANCHOR_UNRESOLVABLE`、`REGION_INVALID`、`REGION_REFLOW`、`FRAME_NOT_SETTLED` 和目标 tab 变化；不记录 DOM 或正文文本。
 
-Full Page diagnostics 包含 `initialHeight`、`maxObservedHeight`、`endExtensions`、`bottomStableSamples`、`fullPageRestarts`、`terminationReason`。正常结束为 `BOTTOM_QUIESCENT`，无限增长预算为 `FULL_GROWTH_LIMIT`，不稳定重排为 `FULL_REFLOW`；不记录正文或 DOM dump。
+Full Page diagnostics 包含 `initialHeight`、`maxObservedHeight`、`endExtensions`、`bottomStableSamples`、`fullPageRestarts`、`terminationReason`。正常结束为 `BOTTOM_QUIESCENT`，无限增长预算为 `FULL_GROWTH_LIMIT`，无法建立视觉连续性为 `VISUAL_CONTINUITY_FAILED`；不记录正文或 DOM dump。
 
 ## 已知限制
 
-fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复。Full Page 通过已提交帧的可见普通流叶元素矩形判断重排；DOM mutation 只标记 dirty 并触发几何复核，不构建语义 DOM 或全文指纹；最多记录 20,000 个几何见证。绝对定位 UI 本身不提供普通流几何证明；整体由绝对定位组成的内容不保证完整 reflow 检测。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
+fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复。Full Page 的普通流叶元素矩形仅提供几何警告；最终由相邻图像的有界视觉连续性决定拼接。DOM mutation 只标记 dirty 并触发几何复核，不构建语义 DOM 或全文指纹；最多记录 20,000 个几何见证。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
 
 不支持虚拟列表、无限 feed、iframe 内部独立滚动、任意二维嵌套滚动、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。持续可观察的选区 reflow 会有界失败；固定数字坐标不承诺跟随内容重排。锚点是按边缘距离／比例解析的视觉点，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
 
@@ -81,6 +81,7 @@ fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢�
 ```sh
 node --test long-page-screenshot-v2/tests/*.test.mjs
 node long-page-screenshot-v2/tests/browser.mjs
+VISUAL_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 OUTPUT_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 DYNAMIC_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 RELIABILITY_ONLY=csdn node long-page-screenshot-v2/tests/browser.mjs
@@ -104,8 +105,27 @@ API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 
 截图结束（成功或失败）后，页面状态面板可点击 **复制诊断信息**，无需 DevTools。JSON 复用结束状态，包含 attempt、metrics、高度/扩展/重启统计及 `diagnostics.fullProof`：
 
-- `trigger`：`WITNESS_MOVED`、`WITNESS_RESIZED`、`WITNESS_REMOVED`；终点缩短走独立的 `FULL_EXTENT_SHRANK` 规划错误及有界重启，不伪称 witness 失效。成功且当前 attempt 未失败时为 `null`。真实 witness 失效仍使用 `reasonCode: FULL_REFLOW` 和一次重启策略。
+- `trigger`：`WITNESS_MOVED`、`WITNESS_RESIZED`、`WITNESS_REMOVED`；终点缩短更新 DOM 终点并由视觉对齐验证。没有 witness 警告时为 `null`；成功截图也可保留警告。witness 失效不再抛出 `FULL_REFLOW`，trace 记录 `visual-continuity-required`。
 - `counters`：从首次 FULL_RESET 起累计跨 attempt 的 mutation 记录总数、忽略数、命中 captured prefix 数，以及 fullProof 验证调用次数；新增 `dirtyMutations`、`harmlessAfterGeometryCheck`、`witnessMoved`、`witnessResized`、`witnessRemoved`、`baselineRebasesBeforeFirstFrame`。每条 mutation 只计一次；mutations = ignoredMutations + dirtyMutations，capturedPrefixMutations 为 dirty 的子集。
-- `trace`：最多保留最近 150 条，跨重启保留；每条包含 attempt、scrollY、documentHeight、viewportHeight、proofEnd／committedEnd、witnessCount 和已提交 frameCount，以及 targetKind、targetScrollY、targetHeight。记录 attempt 开始、witness 建立、mutation 命中、FULL_REFLOW 及结束。验证失败另外包含几何 before/current/delta 和 connected。
+- `trace`：最多保留最近 150 条，跨重启保留；每条包含 attempt、scrollY、documentHeight、viewportHeight、proofEnd／committedEnd、witnessCount 和已提交 frameCount，以及 targetKind、targetScrollY、targetHeight。记录 attempt 开始、witness 建立、mutation 命中、视觉验证请求及结束。验证失败另外包含几何 before/current/delta 和 connected。
 
-为避免 DOM 属性包含账号或凭据，descriptor 的 `id` / `className` 使用加盐匿名标签（class 输入最多 120 字符），同一页面注入期间可关联；不导出原始值或 data-testid。不同页面报告的匿名标签不能直接对照。JSON 不包含 URL、正文、HTML、图片、下载路径、Cookie 或页面 storage；自由文本错误使用固定安全提示，详细分类以 reasonCode/trigger 为准。几何 epsilon 仍为 0.5px。Mutation 不直接宣布重排：trace 区分 mutation-observed、mutation-marked-dirty、dirty-verified-harmless 和 dirty-verified-invalid。只有 offscreen FRAME 确认成功后才推进 committedEnd；截图前 pending witnesses 不代表已提交像素。首帧前几何改变走有界重采样／基线重建并计入 baselineRebasesBeforeFirstFrame，不消耗 Attempt restart。已提交 witness 移动、resize 或消失才按一次重启／第二次失败处理。绝对定位、fixed/sticky UI 不作为普通流见证；它们导致的普通流内容移动仍会被复核发现。
+为避免 DOM 属性包含账号或凭据，descriptor 的 `id` / `className` 使用加盐匿名标签（class 输入最多 120 字符），同一页面注入期间可关联；不导出原始值或 data-testid。不同页面报告的匿名标签不能直接对照。JSON 不包含 URL、正文、HTML、图片、下载路径、Cookie 或页面 storage；自由文本错误使用固定安全提示，详细分类以 reasonCode/trigger 为准。几何 epsilon 仍为 0.5px。Mutation 不直接宣布重排：trace 区分 mutation-observed、mutation-marked-dirty、dirty-verified-harmless 和 dirty-verified-invalid。只有 offscreen FRAME 确认成功后才推进 committedEnd；截图前 pending witnesses 不代表已提交像素。首帧前几何改变走有界重采样／基线重建并计入 baselineRebasesBeforeFirstFrame，不消耗 Attempt restart。已提交 witness 移动、resize 或消失保留数值证据并要求视觉验证，不消耗整页 restart。绝对定位、fixed/sticky UI 不作为普通流见证；它们导致的普通流内容移动仍会被复核发现。
+
+
+### Full Page Visual Continuity
+
+原则：证明相邻截图可可靠对齐，不证明网页从未变化。Region 的滚动、锚点、裁剪和重试流程不使用 matcher。没有 OCR、AI/ML、第三方 CV、正文识别或站点 selector。
+
+- 重叠：`min(clientHeight - 32, clamp(clientHeight * 0.25, 160, 320))` CSS px；常规 700px 视口每次前进 525px。小视口保留至少 32px 前进空间。
+- 表示：offscreen 从实际 bitmap 裁出 CaptureTarget 条带，横向约 4 CSS px 一采样，宽度最多 384；纵向保留 1 CSS px 精度。灰度用于搜索，额外紧凑 RGB 样本仅核验最佳候选，防止不同彩色渐变出现灰度别名。条带高度最多 `overlap + 2*96 + 64`，即 576 行；底部大重叠时移动当前条带采样起点。
+- 搜索：12 个横向 tiles，预计位移 ±96 CSS px，每个候选使用相同的行区间；不做旋转、缩放或横向注册。稳定几何 fast path 每 tile 最多采 24 行、横向每 6 个表示像素一取样。发现 witness／extent 变化、非零修正或快速检查不通过，改为最多 64 行、横向每 2 个表示像素取样。两条路径均检查第二候选，不能用 geometry 绕过低信息或歧义拒绝。
+- 共识：灰度标准差至少 5，采样行间的平均垂直变化至少 0.05（排除只在横向有边框、纵向恒定的 tile）；至少 3 个 informative tiles，且至少 60% 同意同一个整数 CSS 位移。最佳归一化平均绝对误差 ≤0.04，灰度及最佳候选 RGB 平均误差均 ≤0.5（0–255）。第二候选误差差距至少 `min(0.018, max(0.005, bestError * 0.5))`；近乎精确匹配允许较小差距，噪声近似匹配不能靠相邻 offset 猜测。分数为 `1/(1+error)`，confidence 为 agreementRatio × bestScore。
+- canonical 坐标：首帧起点 0；后续为上一帧 canonicalY + matchedOffset。只绘制上次 committed end 之后的部分，源裁剪仍使用当前目标视口。文档高度用于滚动终点和增长保护，最终 PNG 高度按 canonical end 裁定，不加入因坐标修正产生的空白尾带。
+- 失败：第一次重试在原位置重新 settle/capture；第二次后退一个有界 overlap（最多 320px），增加共享内容。两次后仍无可靠匹配则停止，不重启整个截图、不输出部分 PNG。目标丢失、导航、环境变化和无限增长保护继续生效；容器 viewport resize 仍使用原有一次重建策略。
+- 横向超宽页：每个纵向 band 的首列建立视觉注册，其它横向列沿用该 band 的 canonical 坐标和原有几何裁剪。因此对跨列独立纵向变形不作保证；主要模型仍是纵向截图。
+
+`diagnostics.visual` 包含 `visualChecks`、`visualFastPath`、`visualRecoveries`、`visualRecoveryRetries`、`visualFailures`、`ambiguousMatches`、`lowInformationRejects`，及最近 150 次匹配 trace（预计／实际位移、修正、搜索半径、重叠、tile 数、共识比例、两候选分数、confidence、path、result）。复制诊断包含这些安全数值，不包含像素、页面文本、HTML、URL、图片数据。
+
+复杂度为 O(T × R × N)，T≤12、R≤193、N 为每 tile 的有界采样数，另有每 tile 的候选排序 O(R log R)。只长期保留上一帧 ≤384×576 的灰度 Float32 与 RGB Uint8 条带，约 1.48 MiB；匹配期间另有当前条带和临时 canvas/ImageData，帧后可回收。不保留全部截图；ImageBitmap 在 finally 中关闭。输出画布预算仍为 16M 像素，扩展／裁定尺寸期间短暂双画布。
+
+边界：超过 ±96px 的真实位移、过少纹理、重复内容、显著亚像素变化或不足 60% 的一致证据可能安全失败。已经捕获区域后来新插入的内容不会追溯添加到 PNG；这是连续浏览路径的记录，不是网页最终时刻的全局快照。不会保证动态侧栏本身时序一致，也不能保证虚拟列表或大范围重绘可拼接。确定性 fixture 通过不等于已认证真实登录态 GitHub/CSDN。

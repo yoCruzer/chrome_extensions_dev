@@ -75,13 +75,13 @@ test('commit promotes only intersecting pre-bitmap witnesses and detects drawing
   const {c,s,element}=fixture();
   s.fullProof={nodes:new Map(),pending:new Map([[element,[10,20,100,50]]]),committedEnd:0,dirty:0};
   element.rect.top+=200;
-  assert.throws(()=>c.commitFullProof(s,{x:0,y:0,right:900,bottom:700}),e=>e.layout);
+  assert.doesNotThrow(()=>c.commitFullProof(s,{x:0,y:0,right:900,bottom:700}));
   assert.equal(s.fullProof.committedEnd,700);
   assert.equal(s.proofDiagnostics.trigger,'WITNESS_MOVED');
 });
 
 for (const kind of ['moved','resized','removed','unchanged','at-threshold']) {
-  test(`witness ${kind}: original threshold and FULL_REFLOW semantics, detailed geometry`, () => {
+  test(`witness ${kind}: original threshold and visual warning semantics, detailed geometry`, () => {
     const {c,s,element}=fixture();
     if(kind==='moved')element.rect.top+=0.51;
     if(kind==='resized')element.rect.height+=1;
@@ -90,7 +90,7 @@ for (const kind of ['moved','resized','removed','unchanged','at-threshold']) {
     if(kind==='unchanged'||kind==='at-threshold') {
       assert.doesNotThrow(()=>c.fullProof(s));assert.equal(s.proofDiagnostics.trigger,null);
     } else {
-      assert.throws(()=>c.fullProof(s),e=>e.layout && e.reasonCode==='FULL_REFLOW');
+      assert.doesNotThrow(()=>c.fullProof(s));
       const entry=s.proofDiagnostics.trace.at(-1);
       assert.equal(entry.trigger,kind==='moved'?'WITNESS_MOVED':kind==='resized'?'WITNESS_RESIZED':'WITNESS_REMOVED');
       assert.equal(entry.connected,kind!=='removed');assert.equal(entry.before.y,20);
