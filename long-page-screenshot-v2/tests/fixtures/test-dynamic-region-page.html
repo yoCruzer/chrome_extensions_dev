@@ -13,6 +13,10 @@ for(let i=0;i<5;i++) {
  for(let y=0;y<480;y++){const row=i*480+y;ctx.fillStyle=`rgb(${row%251},${Math.floor(row/251)},97)`;ctx.fillRect(0,y,500,1)}
  ctx.fillStyle='white';ctx.font='20px monospace';ctx.fillText(labels[i],100,80);article.append(canvas);
 }
+window.growArticle=()=>{
+ const block=document.createElement('div');block.style.height='300px';
+ article.insertBefore(block,document.getElementById('BOTTOM_MARKER'));
+};
 let step=0,timer;
 window.changeBanner=()=>{
  const zone=document.getElementById('dynamic-banner-zone');

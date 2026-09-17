@@ -218,14 +218,14 @@ async function run(s) {
       try {
         let view;
         if (s.mode === "region") {
-          const resolved = await request(s, "content", "MEASURE");
-          s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
-            right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
-          s.scope = resolved.scope;
           if (attempt) {
             s.metrics.retries++;
             await status(s, "loading", "所选内容发生变化，正在重新截图…");
           }
+          const resolved = await request(s, "content", "MEASURE");
+          s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
+            right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
+          s.scope = resolved.scope;
           view = await scroll(s, s.region.x, s.region.y);
         } else if (attempt) {
           s.metrics.retries++;
@@ -320,9 +320,9 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
       // Claim the selection before awaiting so duplicate submissions cannot run twice.
       try {
         await status(s, "preparing", "正在复核选区…");
-        const page = await request(s, "content", "MEASURE");
-        regionFromEdges(page.region ? { left: page.region.x, top: page.region.y,
-          right: page.region.x + page.region.width, bottom: page.region.y + page.region.height } : m.edges, page);
+        // Resolve content anchors inside run's bounded Attempt, after prepare.
+        const page = await request(s, "content", "MEASURE", { viewportOnly: true });
+        if (!page.anchored) regionFromEdges(m.edges, page);
         s.edges = m.edges;
         validateRegion(s, page);
         void run(s);

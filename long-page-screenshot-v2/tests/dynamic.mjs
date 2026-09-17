@@ -4,31 +4,80 @@ import { readFile } from 'node:fs/promises';
 export async function testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG }) {
   const reference = (await page.evaluate(() => [...document.querySelectorAll('canvas')].map(c => c.toDataURL().split(',')[1])))
     .map(data => PNG.sync.read(Buffer.from(data, 'base64')));
-  const select = async () => {
+  const select = async (container = false) => {
+    if (container) await page.evaluate(() => document.getElementById('target-article').style.paddingBottom = '20px');
     await capture('region');
     await page.mouse.click(642, 245);
     await page.mouse.click(80, 40);
     await page.evaluate(() => scrollTo(0, 1940));
     await page.mouse.click(730, 245);
     // Last pixel is deliberately inside the bottom DOM anchor.
-    await page.mouse.click(579, 499);
+    await page.mouse.click(579, container ? 509 : 499);
   };
   const start = () => page.mouse.click(811, 245);
-  const verify = async result => {
+  const verify = async (result, container = false) => {
     assert.equal(result.state, 'complete', JSON.stringify(result));
     assert.equal(result.parts, 1);
     const png = PNG.sync.read(await readFile(result.result.filename));
-    assert.equal(png.width, 499);assert.equal(png.height, 2399);
+    assert.equal(png.width, 499);assert.equal(png.height, container ? 2409 : 2399);
     // Compare the entire output to immutable pre-selection canvas pixels,
     // including TOP/CHECKPOINT/BOTTOM text, both edges and every seam row.
     for(let y=0;y<png.height;y++) {
+      if (y >= 2400) {
+        for (let x=0;x<png.width;x++) assert.deepEqual([...png.data.subarray((y*png.width+x)*4,(y*png.width+x+1)*4)], [224,0,224,255]);
+        continue;
+      }
       const expected=reference[Math.floor(y/480)], source=(y%480)*expected.width*4;
       assert.deepEqual(png.data.subarray(y*png.width*4,(y+1)*png.width*4),
         expected.data.subarray(source,source+png.width*4), `content row ${y}`);
     }
   };
   const reset = async () => { await page.reload(); };
-  await select();
+  await select(true);await page.evaluate(() => changeBanner());await start();
+  await verify(await waitFor(s => !s.busy), true);
+  console.log('PASS unchanged container anchor follows translation: all five markers and padding pixels');
+  await reset();await select(true);
+  await page.evaluate(() => {
+    document.getElementById('dynamic-banner-zone').style.height = '0px';
+    document.getElementById('bottom-zone').remove();
+  });
+  await start();await verify(await waitFor(s => !s.busy), true);
+  console.log('PASS upward translation resolves anchors even when old numeric bottom exceeds document');
+  // Both points use the real picker; the lower point hits article padding,
+  // not the fixed-size BOTTOM canvas. Growth moves the marker past old dy.
+  const assertResizeFailure = async result => {
+    assert.equal(result.state, 'failed', JSON.stringify(result));
+    assert.match(result.message, /锚点尺寸已变化/);
+    assert.equal(result.metrics.retries, 1);
+    assert.equal(result.parts, 0);
+    assert.equal(result.result, undefined);
+    assert.equal((await worker.evaluate(() => chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']}))).length, 0);
+    assert.deepEqual(await page.evaluate(() => [scrollX, scrollY]), [0, 0]);
+  };
+  for (const timing of ['before', 'committed', 'bitmap']) {
+    await reset();await select(true);
+    const downloadsBefore = await worker.evaluate(async () => (await chrome.downloads.search({})).length);
+    if (timing === 'before') await page.evaluate(() => growArticle());
+    if (timing === 'bitmap') await worker.evaluate(() => {
+      const original = chrome.tabs.captureVisibleTab.bind(chrome.tabs);
+      chrome.tabs.captureVisibleTab = async (...args) => {
+        chrome.tabs.captureVisibleTab = original;
+        const [tab] = await chrome.tabs.query({active:true,currentWindow:true});
+        await chrome.scripting.executeScript({target:{tabId:tab.id},world:'MAIN',func:()=>growArticle()});
+        return original(...args);
+      };
+    });
+    await start();
+    if (timing === 'committed') {
+      await waitFor(s => s.state === 'capturing');
+      assert.equal((await worker.evaluate(() => chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']}))).length, 1);
+      await page.evaluate(() => growArticle());
+    }
+    await assertResizeFailure(await waitFor(s => !s.busy));
+    assert.equal(await worker.evaluate(async () => (await chrome.downloads.search({})).length), downloadsBefore);
+    console.log(`PASS article padding anchor resize ${timing}: one retry, explicit failure, no downloaded PNG, canvas cleaned`);
+  }
+  await reset();await select();
   await page.evaluate(() => changeBanner());
   await start();await verify(await waitFor(s=>!s.busy));
   console.log('PASS dynamic selection-before-start translation: TOP, 3 checkpoints, BOTTOM and every row');

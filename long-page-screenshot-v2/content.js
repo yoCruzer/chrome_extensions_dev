@@ -57,7 +57,10 @@
     }
     if (!element || element === s.host || element === progress?.host) throw new Error("无法定位所选内容，请重新点选。");
     const rect = element.getBoundingClientRect();
-    return { element, dx: x - rect.left, dy: y - rect.top, initial: { x: x + scrollX, y: y + scrollY } };
+    return { element, dx: x - rect.left, dy: y - rect.top,
+      width: rect.width, height: rect.height,
+      insets: { left: x - rect.left, top: y - rect.top, right: rect.right - x, bottom: rect.bottom - y },
+      initial: { x: x + scrollX, y: y + scrollY } };
   }
 
   function resolveRegion(s) {
@@ -69,6 +72,11 @@
         const style = getComputedStyle(anchor.element);
         if (style.visibility !== "visible" || Number(style.opacity) === 0) throw new Error("所选内容锚点不可见，请重新选择区域。");
         const r = anchor.element.getBoundingClientRect();
+        // Compare to selection geometry, never rebase offsets onto a resized element.
+        // One layout unit tolerates rounding noise without accumulating drift.
+        if (Math.abs(r.width - anchor.width) > 1 / 64 || Math.abs(r.height - anchor.height) > 1 / 64) {
+          throw Object.assign(new Error("所选内容锚点尺寸已变化，请重新选择区域。"), { layout: true });
+        }
         if (!r.width || !r.height || anchor.dx > r.width || anchor.dy > r.height) {
           throw Object.assign(new Error("所选内容本身持续变化，请稍后重试。"), { layout: true });
         }
@@ -311,9 +319,10 @@
       }
       if (m.type === "SHOW_UI") { if (progress) progress.host.style.setProperty("visibility", "visible", "important"); return {}; }
       if (m.type === "TOUCH") return {};
-      if (m.type === "PREPARE") { s.edges = m.edges || s.edges; prepare(s); return regionView(s); }
+      if (m.type === "PREPARE") { s.edges = m.edges || s.edges; prepare(s); return measure(); }
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y, m.relative);
-      if (m.type === "MEASURE") return regionView(s);
+      if (m.type === "MEASURE") return m.viewportOnly
+        ? { ...measure(), anchored: !!(s.anchors?.first && s.anchors?.second) } : regionView(s);
       throw new Error("未知页面消息。");
     })().then(value => respond({ ok: true, ...value }), error => respond({ ok: false, error: error.message, layout: !!error.layout }));
     return true;
