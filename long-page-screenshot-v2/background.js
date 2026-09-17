@@ -22,7 +22,7 @@ const ready = (async () => {
 })().catch(() => { lastStatus = { busy: false, state: "failed", message: "启动恢复未完成，可以重新开始截图。" }; });
 
 function check(s) {
-  if (active !== s || s.cancelled || s.finishing) throw new Error(s.reason || "截图已取消。");
+  if (active !== s || s.cancelled || s.finishing) throw Object.assign(new Error(s.reason || "截图已取消。"), { reasonCode: s.reasonCode || "CAPTURE_CANCELLED" });
   if (Date.now() - s.started > 15 * 60_000) throw new Error("任务超过 15 分钟，请缩小选区后重试。");
 }
 
@@ -30,7 +30,7 @@ async function status(s, state, message) {
   check(s);
   s.state = state;
   lastStatus = { id: s.id, tabId: s.tab.id, state, message, busy: true,
-    frames: s.frames, parts: s.parts, downloadId: s.downloadId };
+    frames: s.frames, parts: s.parts, attempt: s.attempt, diagnostics: s.diagnostics, downloadId: s.downloadId };
   await chrome.storage.session.set({ status: lastStatus });
   await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "PROGRESS", id: s.id, status: lastStatus }, { frameId: 0 }).catch(() => {});
 }
@@ -42,7 +42,11 @@ async function request(s, target, type, payload = {}) {
     ? await chrome.tabs.sendMessage(s.tab.id, message, { frameId: 0 })
     : await chrome.runtime.sendMessage(message);
   check(s);
-  if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout });
+  if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout, reasonCode: response?.reasonCode, diagnostics: response?.diagnostics });
+  if (s.mode === "region" && s.environment && target === "content" && ["MEASURE", "SCROLL"].includes(type)) {
+    response.tabZoom = await chrome.tabs.getZoom(s.tab.id);
+    check(s);
+  }
   return response;
 }
 
@@ -58,6 +62,8 @@ async function finish(s, error) {
   }
   lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
     metrics: { ...s.metrics, totalMs: Date.now() - s.started },
+    ...(s.mode === "region" ? { reasonCode: error ? error.reasonCode || "CAPTURE_FAILED" : undefined,
+      attempt: s.attempt || 1, diagnostics: { ...s.diagnostics, ...error?.diagnostics } } : {}),
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
     message: error ? error.message : "截图完成，已保存一张 PNG。" };
   await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "PROGRESS", id: s.id, status: lastStatus }, { frameId: 0 }).catch(() => {});
@@ -76,7 +82,7 @@ async function start(mode, output = "auto") {
   try {
     await status(s, "preparing", "正在准备页面…");
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-    s.selectionPage = await request(s, "content", "BEGIN", { mode });
+    await request(s, "content", "BEGIN", { mode });
     s.heartbeat = setInterval(() => {
       request(s, "content", "TOUCH").catch(error => {
         s.cancelled = true; s.reason = error.message;
@@ -92,22 +98,44 @@ async function start(mode, output = "auto") {
 async function ensureVisible(s) {
   check(s);
   const [tab] = await chrome.tabs.query({ active: true, windowId: s.tab.windowId });
-  if (tab?.id !== s.tab.id) throw new Error("截图页面已切换，请保持目标标签页在前台。");
+  if (tab?.id !== s.tab.id) throw Object.assign(new Error("截图页面已切换，请保持目标标签页在前台。"), { reasonCode: "TARGET_TAB_CHANGED" });
+  if (s.mode === "region" && s.environment) {
+    const tabZoom = await chrome.tabs.getZoom(s.tab.id);
+    validateEnvironment(s, { ...s.lastView, tabZoom, tabId: tab.id });
+  }
 }
 
 function validateView(s, view) {
+  if (s.mode === "region") {
+    s.lastView = view;
+    validateEnvironment(s, { ...view, tabZoom: view.tabZoom ?? s.environment.tabZoom, tabId: s.tab.id });
+    validateRegion(s, view);
+    return;
+  }
   if (!sameViewport(s.viewport, view) || view.visualScale !== 1) throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
-  if (s.mode === "full" && view.width !== s.viewport.width) throw new Error("页面宽度发生变化，请等待页面稳定后重试。");
-  if (s.mode === "region") validateRegion(s, view);
+  if (view.width !== s.viewport.width) throw new Error("页面宽度发生变化，请等待页面稳定后重试。");
+}
+
+function validateEnvironment(s, actual) {
+  const expected = s.environment;
+  s.diagnostics = { ...s.diagnostics, environment: { baseline: expected, actual } };
+  for (const field of ["innerWidth", "innerHeight", "tabZoom", "visualScale", "tabId"]) {
+    const epsilon = ["tabZoom", "visualScale"].includes(field) ? 0.0001 : 0;
+    if (!Number.isFinite(actual[field]) || Math.abs(expected[field] - actual[field]) > epsilon) {
+      throw Object.assign(new Error(`CAPTURE_ENV_CHANGED: ${field} ${expected[field]} -> ${actual[field]}`), {
+        reasonCode: "CAPTURE_ENV_CHANGED", diagnostics: { ...s.diagnostics, delta: { field, expected: expected[field], actual: actual[field] } }
+      });
+    }
+  }
 }
 
 function validateRegion(s, page) {
-  if (!sameViewport(s.selectionPage, page) || page.visualScale !== s.selectionPage.visualScale) {
-    throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
-  }
+  s.diagnostics = { ...s.diagnostics, anchors: page.anchors, region: { before: s.region, current: page.region } };
   if (s.region && page.region && (Math.abs(page.region.width - s.region.width) > 0.01 ||
-      Math.abs(page.region.height - s.region.height) > 0.01 || page.scope !== s.scope)) {
-    throw Object.assign(new Error("所选内容本身持续变化，请稍后重试。"), { layout: true });
+      Math.abs(page.region.height - s.region.height) > 0.01)) {
+    throw Object.assign(new Error("所选区域持续发生布局变化，请稍后重试。"), {
+      layout: true, reasonCode: "REGION_REFLOW", diagnostics: s.diagnostics
+    });
   }
 }
 
@@ -136,7 +164,7 @@ async function capture(s, view) {
     try { return { view, dataUrl: await captureOnce(s, view) }; }
     catch (error) {
       if (!error.translation || sample === 2) throw error;
-      // Only this uncommitted frame moved; keep already verified scope pixels.
+      // Only this uncommitted frame moved; keep already verified canvas pixels.
       s.metrics.frameRetries++;
       view = await scroll(s, target.x, target.y);
     }
@@ -149,6 +177,13 @@ async function captureOnce(s, view) {
   await ensureVisible(s);
   await request(s, "content", "HIDE_UI");
   try {
+    if (s.mode === "region") {
+      const before = await request(s, "content", "MEASURE");
+      validateView(s, before);
+      if (before.x !== view.x || before.y !== view.y || before.region.x !== view.region.x || before.region.y !== view.region.y) {
+        throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true, reasonCode: "FRAME_MOVED" });
+      }
+    }
     lastCapture = Date.now();
     s.metrics.captures++;
     const dataUrl = await chrome.tabs.captureVisibleTab(s.tab.windowId, { format: "png" });
@@ -212,21 +247,42 @@ async function run(s) {
   try {
     await status(s, "preparing", "正在准备截图…");
     s.viewport = await request(s, "content", "PREPARE", { edges: s.edges });
-    if (s.mode === "region") validateRegion(s, s.viewport);
-    if (s.viewport.visualScale !== 1 || s.viewport.clientHeight < 64 || s.viewport.clientWidth < 64) throw new Error("请恢复触控缩放并增大浏览器窗口。");
+    if (s.mode === "region") {
+      s.environment = { ...s.viewport, tabZoom: await chrome.tabs.getZoom(s.tab.id), tabId: s.tab.id };
+      s.lastView = s.viewport;
+    }
+    if (s.mode === "full" && (s.viewport.visualScale !== 1 || s.viewport.clientHeight < 64 || s.viewport.clientWidth < 64)) throw new Error("请恢复触控缩放并增大浏览器窗口。");
+    if (s.mode === "region" && Math.abs(s.viewport.visualScale - 1) > 0.0001) {
+      throw Object.assign(new Error(`CAPTURE_ENV_UNSUPPORTED: visualScale ${s.viewport.visualScale}，请恢复触控缩放。`), {
+        reasonCode: "CAPTURE_ENV_UNSUPPORTED", diagnostics: { environment: { baseline: s.environment, actual: s.environment } }
+      });
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
+      s.attempt = attempt + 1;
       try {
-        let view;
+        let view, dataUrl;
         if (s.mode === "region") {
           if (attempt) {
             s.metrics.retries++;
             await status(s, "loading", "所选内容发生变化，正在重新截图…");
           }
-          const resolved = await request(s, "content", "MEASURE");
-          s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
-            right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
-          s.scope = resolved.scope;
-          view = await scroll(s, s.region.x, s.region.y);
+          // No canvas exists yet: adopt a coherent current region before Attempt's
+          // first committed frame. Bound acquisition even if the page keeps moving.
+          for (let sample = 0; sample < 3; sample++) {
+            try {
+              const resolved = await request(s, "content", "MEASURE");
+              s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
+                right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
+              validateView(s, resolved);
+              view = await scroll(s, s.region.x, s.region.y);
+              outputGeometry(s.region, view, { width: view.innerWidth, height: view.innerHeight }, s.output === "device" ? "auto" : s.output);
+              ({ view, dataUrl } = await capture(s, view));
+              break;
+            } catch (error) {
+              if (!error.layout || sample === 2 || attempt) throw error;
+              s.metrics.frameRetries++;
+            }
+          }
         } else if (attempt) {
           s.metrics.retries++;
           await status(s, "loading", "布局发生变化，正在安全预加载并重新截图…");
@@ -238,11 +294,10 @@ async function run(s) {
         }
         // Reject impossible fixed sizes before the first screenshot. Device scale
         // is checked again against the actual first bitmap (not emulated DPR).
-        const estimatedSource = s.output === "device" ? view.dpr : 1;
+        const estimatedSource = s.mode === "full" && s.output === "device" ? view.dpr : 1;
         outputGeometry(s.region, view, { width: view.innerWidth * estimatedSource,
-          height: view.innerHeight * estimatedSource }, s.output);
-        let dataUrl;
-        ({ view, dataUrl } = await capture(s, view));
+          height: view.innerHeight * estimatedSource }, s.mode === "region" && s.output === "device" ? "auto" : s.output);
+        if (!dataUrl) ({ view, dataUrl } = await capture(s, view));
         s.offscreen = true;
         const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
         if (contexts.length) await chrome.offscreen.closeDocument();
@@ -272,7 +327,10 @@ async function run(s) {
           }
           y = bandBottom;
         }
-        if (s.mode === "region") validateView(s, await request(s, "content", "MEASURE"));
+        if (s.mode === "region") {
+          await ensureVisible(s);
+          validateView(s, await request(s, "content", "MEASURE"));
+        }
         await status(s, "encoding", `正在生成图片 · ${scale.width} × ${scale.height} 像素…`);
         const encodeStart = Date.now();
         const { url } = await request(s, "offscreen", "EXPORT");
@@ -324,7 +382,6 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
         const page = await request(s, "content", "MEASURE", { viewportOnly: true });
         if (!page.anchored) regionFromEdges(m.edges, page);
         s.edges = m.edges;
-        validateRegion(s, page);
         void run(s);
         return {};
       } catch (error) { await finish(s, error); throw error; }
@@ -336,19 +393,19 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
 
 chrome.tabs.onActivated.addListener(info => {
   if (active && active.state !== "selecting" && info.windowId === active.tab.windowId && info.tabId !== active.tab.id) {
-    active.cancelled = true; active.reason = "目标标签页已切换，截图已停止。";
+    active.cancelled = true; active.reasonCode = "TARGET_TAB_CHANGED"; active.reason = "目标标签页已切换，截图已停止。";
   }
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   if (active?.tab.id === tabId) {
-    active.cancelled = true; active.reason = "目标标签页已关闭。";
+    active.cancelled = true; active.reasonCode = "TARGET_TAB_CLOSED"; active.reason = "目标标签页已关闭。";
     if (active.state === "selecting") void finish(active, new Error(active.reason));
   }
 });
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (active?.tab.id === tabId && change.status === "loading") {
-    active.cancelled = true; active.reason = "目标页面已导航或刷新，截图已停止。";
+    active.cancelled = true; active.reasonCode = "TARGET_TAB_NAVIGATED"; active.reason = "目标页面已导航或刷新，截图已停止。";
     if (active.state === "selecting") void finish(active, new Error(active.reason));
   }
 });

@@ -59,6 +59,8 @@
     const rect = element.getBoundingClientRect();
     return { element, dx: x - rect.left, dy: y - rect.top,
       width: rect.width, height: rect.height,
+      rect: { x: rect.left + scrollX, y: rect.top + scrollY, width: rect.width, height: rect.height },
+      rx: (x - rect.left) / rect.width, ry: (y - rect.top) / rect.height,
       insets: { left: x - rect.left, top: y - rect.top, right: rect.right - x, bottom: rect.bottom - y },
       initial: { x: x + scrollX, y: y + scrollY } };
   }
@@ -67,54 +69,50 @@
     if (!s.edges) return null;
     let edges = s.edges;
     if (s.anchors?.first && s.anchors?.second) {
-      const point = anchor => {
-        if (!anchor.element.isConnected) throw new Error("所选内容锚点已失效，请重新选择区域。");
-        const style = getComputedStyle(anchor.element);
-        if (style.visibility !== "visible" || Number(style.opacity) === 0) throw new Error("所选内容锚点不可见，请重新选择区域。");
+      s.anchorDiagnostics = {};
+      const point = (anchor, role) => {
         const r = anchor.element.getBoundingClientRect();
-        // Compare to selection geometry, never rebase offsets onto a resized element.
-        // One layout unit tolerates rounding noise without accumulating drift.
-        if (Math.abs(r.width - anchor.width) > 1 / 64 || Math.abs(r.height - anchor.height) > 1 / 64) {
-          throw Object.assign(new Error("所选内容锚点尺寸已变化，请重新选择区域。"), { layout: true });
+        const style = getComputedStyle(anchor.element);
+        const diagnostic = s.anchorDiagnostics[role] = {
+          connected: anchor.element.isConnected, before: anchor.rect,
+          current: { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: r.height },
+          mode: "unresolvable", point: null
+        };
+        if (!diagnostic.connected || style.visibility !== "visible" || Number(style.opacity) === 0 ||
+            ![r.width, r.height].every(n => Number.isFinite(n) && n > 0)) {
+          throw Object.assign(new Error("所选内容锚点已失效，请重新选择区域。"), {
+            reasonCode: "ANCHOR_UNRESOLVABLE", diagnostics: { anchors: s.anchorDiagnostics }
+          });
         }
-        if (!r.width || !r.height || anchor.dx > r.width || anchor.dy > r.height) {
-          throw Object.assign(new Error("所选内容本身持续变化，请稍后重试。"), { layout: true });
-        }
-        return { x: r.left + scrollX + anchor.dx, y: r.top + scrollY + anchor.dy };
+        const unchanged = r.width === anchor.width && r.height === anchor.height;
+        let edge = false;
+        const offset = (size, original, local, ratio, start, end) => {
+          if (size === original) return local;
+          const inset = role === "first" ? start : end;
+          if (inset <= Math.min(24, original * 0.1)) {
+            edge = true;
+            return role === "first" ? Math.min(inset, size) : Math.max(0, size - inset);
+          }
+          return ratio * size;
+        };
+        const dx = offset(r.width, anchor.width, anchor.dx, anchor.rx, anchor.insets.left, anchor.insets.right);
+        const dy = offset(r.height, anchor.height, anchor.dy, anchor.ry, anchor.insets.top, anchor.insets.bottom);
+        diagnostic.mode = unchanged ? "exact" : edge ? "edge-affinity" : "ratio";
+        diagnostic.point = { x: r.left + scrollX + dx, y: r.top + scrollY + dy };
+        return diagnostic.point;
       };
-      const a = point(s.anchors.first), b = point(s.anchors.second);
+      const a = point(s.anchors.first, "first"), b = point(s.anchors.second, "second");
       edges = { left: a.x, top: a.y, right: b.x, bottom: b.y };
     }
     const region = { x: edges.left, y: edges.top, width: edges.right - edges.left, height: edges.bottom - edges.top };
-    if (region.width <= 0 || region.height <= 0) throw Object.assign(new Error("所选内容本身持续变化，请稍后重试。"), { layout: true });
+    if (![region.x, region.y, region.width, region.height].every(Number.isFinite) || region.width <= 0 || region.height <= 0) throw Object.assign(new Error("选区无效，请重新选择区域。"), { reasonCode: "REGION_INVALID", diagnostics: { anchors: s.anchorDiagnostics, region } });
     return region;
   }
 
   function regionView(s) {
     const view = measure(), region = resolveRegion(s);
     if (!region) return view;
-    // Compare only nodes intersecting the selected scope. Ancestor page shells
-    // and outside modules must not turn document growth into scope invalidation.
-    s.nodeIds ||= new WeakMap();
-    s.nextNodeId ||= 1;
-    const scope = [];
-    for (const element of document.body.querySelectorAll("*")) {
-      if (element === s.host || element === progress?.host || /^(SCRIPT|STYLE)$/.test(element.tagName)) continue;
-      if (s.anchors?.first && s.anchors?.second && element !== s.anchors.first.element && element !== s.anchors.second.element &&
-          element.contains(s.anchors.first.element) && element.contains(s.anchors.second.element)) continue;
-      const style = getComputedStyle(element);
-      if (style.visibility !== "visible" || Number(style.opacity) === 0 ||
-          (style.position === "fixed" && Number(style.zIndex) < 0)) continue;
-      const r = element.getBoundingClientRect();
-      const x = r.left + scrollX - region.x, y = r.top + scrollY - region.y;
-      if (!r.width || !r.height || x >= region.width || y >= region.height || x + r.width <= 0 || y + r.height <= 0) continue;
-      if (x < 0 && y < 0 && x + r.width > region.width && y + r.height > region.height && element.children.length) continue;
-      if (!s.nodeIds.has(element)) s.nodeIds.set(element, s.nextNodeId++);
-      scope.push([s.nodeIds.get(element), ...[x, y, r.width, r.height].map(n => Math.round(n * 64) / 64),
-        [...element.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(""),
-        element instanceof HTMLImageElement ? element.currentSrc : ""]);
-    }
-    return { ...view, region, scope: JSON.stringify(scope) };
+    return { ...view, region, anchors: s.anchorDiagnostics };
   }
 
   function requireSession(id) {
@@ -177,15 +175,15 @@
     const rect = element.getBoundingClientRect();
     const width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
     if (style.visibility !== "visible" || Number(style.opacity) === 0 ||
-        rect.width < 16 || rect.height < 16 || rect.bottom <= 0 || rect.right <= 0 ||
-        rect.top >= height || rect.left >= width || Number(style.zIndex) < 0) return;
+        rect.width < 16 || rect.height < 16 || Number(style.zIndex) < 0 ||
+        (s.mode !== "region" && (rect.bottom <= 0 || rect.right <= 0 || rect.top >= height || rect.left >= width))) return;
     // Leave large application shells/backgrounds alone. Only bounded overlays
     // or sticky blocks with an actual inset are likely to repeat over content.
     if (rect.width * rect.height > width * height * 0.65) return;
     const atEdge = rect.top <= 2 || rect.left <= 2 || rect.bottom >= height - 2 || rect.right >= width - 2;
     if (position === "fixed" && !atEdge && !(Number(style.zIndex) > 0)) return;
     if (position === "sticky" && [style.top, style.right, style.bottom, style.left].every(value => value === "auto")) return;
-    const changes = position === "fixed" ? { visibility: "hidden", opacity: "0" }
+    const changes = s.mode === "region" || position === "fixed" ? { visibility: "hidden", opacity: "0" }
       : { position: "relative", top: "auto", right: "auto", bottom: "auto", left: "auto" };
     s.changed.set(element, Object.keys(changes).map(key => [key, element.style.getPropertyValue(key), element.style.getPropertyPriority(key)]));
     for (const [key, value] of Object.entries(changes)) element.style.setProperty(key, value, "important");
@@ -196,6 +194,11 @@
     s.removeSelectionListener?.();
     s.host?.remove();
     s.capturing = true;
+    if (!s.style) establishLayout(s);
+    for (const name of ["wheel", "touchmove", "pointerdown"]) document.addEventListener(name, onInput, { capture: true, passive: false });
+  }
+
+  function establishLayout(s) {
     s.style = document.createElement("style");
     s.style.textContent = `* { scroll-behavior: auto !important; scroll-snap-type: none !important;
       overflow-anchor: none !important; animation-play-state: paused !important;
@@ -210,7 +213,6 @@
       }
     });
     s.observer.observe(document.documentElement, { childList: true, subtree: true });
-    for (const name of ["wheel", "touchmove", "pointerdown"]) document.addEventListener(name, onInput, { capture: true, passive: false });
   }
 
   async function settle(id, x, y, relative) {
@@ -232,8 +234,9 @@
       }
       if (relative) move();
       const view = regionView(s);
-      const signature = JSON.stringify(view.region ? { ...view, width: 0, height: 0,
-        x: view.x - view.region.x, y: view.y - view.region.y, region: { width: view.region.width, height: view.region.height } } : view);
+      const signature = JSON.stringify(view.region ? {
+        x: view.x - view.region.x, y: view.y - view.region.y,
+        width: view.region.width, height: view.region.height } : view);
       const imagesLoading = [...document.images].some(img => {
         if (img.complete) return false;
         const rect = img.getBoundingClientRect();
@@ -245,8 +248,8 @@
       previous = signature;
       if (stable >= (relative ? 1 : 3)) return view;
     }
-    throw Object.assign(new Error(session?.edges ? "所选内容本身持续变化，请稍后重试。"
-      : "页面仍在移动或图片尚未加载，请等待页面稳定后重试。"), { layout: !!session?.edges });
+    throw Object.assign(new Error(session?.edges ? "所选区域持续发生布局变化，请稍后重试。"
+      : "页面仍在移动或图片尚未加载，请等待页面稳定后重试。"), { layout: !!session?.edges, reasonCode: "FRAME_NOT_SETTLED" });
   }
 
   function select(s) {
@@ -307,7 +310,7 @@
   chrome.runtime.onMessage.addListener((m, sender, respond) => {
     if (m?.target !== "content" || sender.id !== chrome.runtime.id) return;
     (async () => {
-      if (m.type === "BEGIN") { begin(m.id); if (m.mode === "region") select(session); return measure(); }
+      if (m.type === "BEGIN") { begin(m.id); session.mode = m.mode; if (m.mode === "region") { establishLayout(session); select(session); } return measure(); }
       // Idempotent cleanup must not clean up a newer session.
       if (m.type === "FINISH") { if (session?.id === m.id) restore(); return {}; }
       if (m.type === "PROGRESS") { showProgress(m.status); return {}; }
@@ -324,7 +327,7 @@
       if (m.type === "MEASURE") return m.viewportOnly
         ? { ...measure(), anchored: !!(s.anchors?.first && s.anchors?.second) } : regionView(s);
       throw new Error("未知页面消息。");
-    })().then(value => respond({ ok: true, ...value }), error => respond({ ok: false, error: error.message, layout: !!error.layout }));
+    })().then(value => respond({ ok: true, ...value }), error => respond({ ok: false, error: error.message, layout: !!error.layout, reasonCode: error.reasonCode, diagnostics: error.diagnostics }));
     return true;
   });
 })();

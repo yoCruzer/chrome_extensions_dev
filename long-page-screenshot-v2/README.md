@@ -22,7 +22,7 @@
 | 50% | CSS 宽高分别乘 0.5 |
 | 原始设备分辨率 | 按 `captureVisibleTab` 实际位图／视口比例输出，通常文件最大 |
 
-尺寸按最终绝对边界四舍五入。单图最多 16,000,000 像素，任一边最多 16,384 像素。固定比例超限会明确提示改用自动、更低比例或缩小区域，**不会静默输出 part 文件**。Auto 需要缩到 CSS 25% 以下时明确失败，建议缩小区域。设备模式先按页面 DPR 做保守预算检查，再以实际首帧位图复核尺寸；浏览器模拟 DPR 与真实位图不同的场景以实际图像决定最终输出。
+尺寸按最终绝对边界四舍五入。单图最多 16,000,000 像素，任一边最多 16,384 像素。固定比例超限会明确提示改用自动、更低比例或缩小区域，**不会静默输出 part 文件**。Auto 需要缩到 CSS 25% 以下时明确失败，建议缩小区域。Full Page 设备模式先按页面 DPR 做保守预算检查；Region 不用 DPR 决定源像素比例，设备模式以实际首帧位图复核尺寸；浏览器模拟 DPR 与真实位图不同的场景以实际图像决定最终输出。
 
 ## 保存位置
 
@@ -42,23 +42,25 @@
 - 任务 ID 隔离过期消息；worker 重启清理旧任务并提示中断。启动时残留 offscreen 关闭失败不会永久阻塞 ready，后续新任务会再次清理。页面端另有 30 秒租约恢复机制。
 - 单阶段最多 1000 步，任务最多 15 分钟；持续增长的页面会被停止。
 
-## Region：选中的内容随布局移动
+## Region：在捕获布局上选择视觉区域
 
-两次点选保存当前 document 生命周期内的 Element 引用、点击点相对元素的 offset、初始 width/height、四边 inset，以及最初页面坐标。命中检测临时隐藏选择层和进度层，避免把扩展 UI 当成锚点。两角都点选后使用内容锚定；直接修改任一数字会清除点选锚点，整组选区回到 coordinate fallback。只点选一角时也使用数字边界，应完成两次点选以启用内容锚定。
+进入 Region 时先建立捕获布局，再显示选择 UI：关闭平滑滚动、scroll snap、滚动锚定，暂停 CSS 动画／过渡并隐藏 caret。对符合启发式的 fixed/sticky 覆盖层仅隐藏可见性、保留占位，不改 `position`。点选后 PREPARE 只移除选择 UI 并锁定输入，不再重写普通文档流。取消、失败、成功均恢复样式、优先级和原始滚动位置。Full Page 保留原有 fixed 隐藏／sticky position 处理。
 
-开始截图后先处理 fixed/sticky、动画与滚动设置，再解析最终 Region。每次滚动、截图后及导出前都会复核锚点和局部 scope。检查包括所选范围相交节点的身份、相对几何、直接文本和图片来源；忽略不可见节点、负 z-index 的 fixed 背景及包围选区的页面容器。
+两角保存当前 document 中的 Element 引用、原矩形、局部 offset、归一化比例及四边距离。尺寸未变时使用精确 offset；resize 后，左上角靠近左／上边缘、右下角靠近右／下边缘的轴保留该边 inset（边缘带为 24px 与原轴长度 10% 的较小值），其它轴使用比例。锚点消失、隐藏、零尺寸或选区无效才拒绝解析。这是视觉点锚定，不是字符或正文语义识别。修改数字会清除锚点，回到固定 document 坐标；只点选一角也使用数字边界。
 
-选区外 document 高度／宽度变化本身不会导致 Region 失败。上方 banner 使正文整体平移时，滚动目标随锚点移动，实际视口换算到本次画布的选区坐标系。若平移恰好发生在一次位图获取过程中，丢弃该未提交帧，最多重新采样两次，不混入旧坐标像素。
+点击开始后，在捕获布局上建立环境基线：目标 tab、`innerWidth/innerHeight`、`chrome.tabs.getZoom()` 和 `visualViewport.scale`。scale 使用 `0.0001` epsilon；clientWidth/clientHeight、document 宽高和 DPR 仅记录诊断，不是 Region fatal invariant。不会拿最初 BEGIN 的页面快照永久比较。真实位图决定源像素比例，拼图仍拒绝不一致的实际 bitmap 尺寸。
 
-锚点自身 resize/reflow 与整体平移分开处理：宽或高相对点选时变化超过 `1/64 CSS px` 就标记布局变化，禁止静默使用旧 dx/dy。未启用 edge affinity；四边 inset 仅记录选择几何，不据此推断重排后的内容位置。捕获前发生 resize 时，在 prepare 后进入有界 Attempt 检查；捕获中发现 resize 时先丢弃临时画布。最多重试一次并重新解析，仍与原始尺寸不同就明确提示「所选内容锚点尺寸已变化，请重新选择区域」，不导出 PNG。重试不会把新尺寸设为基准，避免稳定但已截断的成功。
+首帧提交前，当前可解析且稳定的区域成为 Attempt 1 基线；未提交的首帧布局变化最多重新采样两次。捕获期间重新解析锚点，纯平移重定位滚动及帧坐标，不重启整个画布；位图获取前后发生平移会丢弃未提交帧，最多重采两次。画布建立后首次区域宽高实质变化，销毁临时 canvas/offscreen，自动建立 Attempt 2 并采用稳定的新区域尺寸，不要求重新点选。Attempt 2 再次出现尺寸变化或无法稳定时，提示「所选区域持续发生布局变化，请稍后重试」，不输出 PNG。
 
-其它局部节点或几何发生实质变化时，丢弃当前画布，重新解析选区并自动重试一次，不要求重新点选；再次变化提示「所选内容本身持续变化，请稍后重试」。锚点被删除或替换则提示重新选择。viewport／zoom 改变仍明确失败。手工坐标模式保留固定坐标含义，不承诺跟随内容移动。
+等待仅检查当前滚动、解析后的区域几何和当前选区内可见图片，每次最多 5 秒。截图前隐藏扩展 UI，并复核位图前后几何。不再遍历整个 DOM 构建 scope 指纹，无关节点替换、广告变化或文档增长不会单独终止 Region。
+
+状态接口及 `chrome.storage.session` 中的 `status` 保留 `reasonCode`、`attempt`、`diagnostics`：环境 baseline/actual、具体差异字段、两角 connected／原始及当前 rect／resolved point／resolver mode，以及区域 before/current。例：`CAPTURE_ENV_CHANGED: innerWidth 900 -> 880`。其它代码包括 `ANCHOR_UNRESOLVABLE`、`REGION_INVALID`、`REGION_REFLOW`、`FRAME_NOT_SETTLED` 和目标 tab 变化；不记录 DOM 或正文文本。
 
 ## 已知限制
 
 fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复；未增加全页面 class/style 监听。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
 
-不支持虚拟列表、无限 feed、iframe 内部独立滚动、独立滚动容器、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。锚点是元素内的像素偏移，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
+不支持虚拟列表、无限 feed、iframe 内部独立滚动、独立滚动容器、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。持续可观察的选区 reflow 会有界失败；固定数字坐标不承诺跟随内容重排。锚点是按边缘距离／比例解析的视觉点，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
 
 ## 开发与测试
 
@@ -69,12 +71,14 @@ node --test long-page-screenshot-v2/tests/*.test.mjs
 node long-page-screenshot-v2/tests/browser.mjs
 OUTPUT_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 DYNAMIC_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+RELIABILITY_ONLY=csdn node long-page-screenshot-v2/tests/browser.mjs
+RELIABILITY_ONLY=chat node long-page-screenshot-v2/tests/browser.mjs
 COMPLEX_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 ```
 
 测试需要 Node 22+，Chrome 集成另需 Playwright 和 pngjs；可通过 `NODE_PATH` 和 `CHROME_EXECUTABLE` 指定。使用临时配置及下载目录，正式 manifest 不增加主机权限；通过真实扩展 `captureVisibleTab`、offscreen 和 downloads 验证，不以自动化截图替代截图引擎。
 
-本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。新增动态 fixture：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，以完整参考像素验证动态 banner 前后的内容身份。详见 [TESTING.md](TESTING.md)。
+本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。新增动态 fixture：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，以完整参考像素验证动态 banner、一次 resize 及重复 reflow。`test-csdn-like-page.html` 和 `test-chat-like-page.html` 分别复现 scrollbar／动态文章和 flex/grid 聊天布局中的两类误报。详见 [TESTING.md](TESTING.md)。
 
 API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Offscreen](https://developer.chrome.com/docs/extensions/reference/api/offscreen)、[Downloads](https://developer.chrome.com/docs/extensions/reference/api/downloads)。

@@ -1,0 +1,46 @@
+<!doctype html><meta charset="utf-8"><title>Chat-like Region reliability fixture</title>
+<style>
+html{overflow-anchor:none}body{margin:0;background:#e000e0}#dynamic-banner-zone{height:40px;background:#ff0000}
+#target-article{margin-left:80px;width:500px}canvas{display:block}#bottom-zone{height:800px;background:#00ffff}
+</style>
+<div id="dynamic-banner-zone">OUTSIDE BANNER</div><article id="target-article"></article><div id="bottom-zone">OUTSIDE BOTTOM</div>
+<script>
+const article = document.getElementById('target-article');
+const labels = ['TOP_MARKER','CHECKPOINT_1','CHECKPOINT_2','CHECKPOINT_3','BOTTOM_MARKER'];
+for(let i=0;i<5;i++) {
+ const canvas=document.createElement('canvas');canvas.width=500;canvas.height=480;canvas.id=labels[i];
+ const ctx=canvas.getContext('2d');
+ for(let y=0;y<480;y++){const row=i*480+y;ctx.fillStyle=`rgb(${row%251},${Math.floor(row/251)},97)`;ctx.fillRect(0,y,500,1)}
+ ctx.fillStyle='white';ctx.font='20px monospace';ctx.fillText(labels[i],100,80);article.append(canvas);
+}
+window.growArticle=()=>{
+ const block=document.createElement('div');block.style.height='300px';
+ article.insertBefore(block,document.getElementById('BOTTOM_MARKER'));
+};
+let step=0,timer;
+window.changeBanner=()=>{
+ const zone=document.getElementById('dynamic-banner-zone');
+ zone.replaceChildren();const child=document.createElement('div');child.textContent='OUTSIDE BANNER '+step;zone.append(child);
+ zone.style.height=[120,220,40][step++%3]+'px';
+};
+window.startBanners=()=>{changeBanner();timer=setInterval(changeBanner,600)};
+window.stopBanners=()=>clearInterval(timer);
+window.growBottom=()=>document.getElementById('bottom-zone').style.height=(800+step++*100)+'px';
+</script>
+
+<style>
+body{display:flex;flex-direction:column}#target-article{display:grid;grid-template-columns:500px}
+#chat-header{position:fixed;top:0;left:0;width:100%;height:30px;background:red;z-index:9}
+#composer{position:sticky;bottom:0;width:500px;height:50px;margin-left:80px;background:cyan}
+/* Old PREPARE's sticky position rewrite changes the selected message shell. */
+body:has(#composer[style*="position: relative"]) #target-article{padding-bottom:60px}
+body:has(#composer[style*="position: relative"]) #target-article canvas{width:499.5px}
+</style>
+<header id="chat-header">CHAT HEADER</header><footer id="composer">COMPOSER</footer>
+
+<script>
+for(const canvas of document.querySelectorAll('canvas')) {
+ const message=document.createElement('section');message.className='message';
+ canvas.before(message);message.append(canvas);
+}
+</script>

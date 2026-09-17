@@ -1,77 +1,61 @@
-# V2 动态 Region 修复验证
+# Region Reliability Reset 验证
 
-2026-09-17；基线 `551d17b64ac7d7c0f03c68915e426d461c744be0`（开始执行时已 fetch 并与 origin/main 核对）。macOS，Chrome 152，Node 24.19.0。
+2026-09-17，开发基线 `2677e2ce6e69e019cba7ba717cc42560c5d0d602`，已 fetch 并确认开始时本地与 origin/main 一致。仅修改 V2。Node 24.19.0，Chrome 152.0.7977.84，隔离临时 profile／下载目录；正式 manifest 未增加权限。
 
-全部使用确定性本地 fixture，不访问 CSDN 或外部验收站点。Chrome 使用独立临时 profile／下载目录，通过正式 manifest、真实 activeTab 授权、captureVisibleTab、offscreen 和 downloads API 完成截图。测试产物不提交；变更仅位于 `long-page-screenshot-v2/`，V0.1 和其它扩展未修改。
+## 错误假设与测试重写
 
-## Anchor resize/reflow P1 closure
+- CSDN 误报根因：Region 将 BEGIN 的 inner/client 宽高、DPR 一起永久冻结，把滚动条与正常文档布局变化误认为 viewport/zoom 改变。现在捕获布局建立后才创建环境基线，仅验证目标 tab、inner 宽高、真实 tab zoom 和 visual scale；scale 使用 epsilon。开始时仍不支持已启用的触控 pinch，保留明确的 CAPTURE_ENV_UNSUPPORTED 提示。client、document 尺寸及 DPR 为诊断数据。
+- ChatGPT 同屏失败根因：点选后 PREPARE 改写 sticky position，再要求锚点尺寸与点选时相差不超过 1/64px。现在布局准备在点选前，Region fixed/sticky 只隐藏可见性并保留占位；提交后不再重写 position。
+- `anchors.test.mjs` 将宽高增减及 0.5px resize「两次解析都必须失败」改为边缘跟随成功，新增内部点 ratio 测试；保留删除、平移及数字 fallback。
+- `background.test.mjs` 将 Region DPR/client 精确相等、scope 字符串变化必须失败改为正常完成校验；保留真实环境字段、区域几何及 Full Page 严格规则。`geometry.test.mjs` 的 strict viewport 测试明确属于 Full Page。
+- `dynamic.mjs` 将开始前、首帧位图期间、首帧提交后的稳定 resize 失败改为正确新尺寸及完整内容验证。无关内部节点替换不再消耗重启；重复 reflow 与锚点删除继续无 PNG。
+- `complex.mjs` 去掉固定数字选区必须因外部 scope 改变重启的断言；保留越界、内容边框、恢复、取消及 offscreen 清理。
 
-旧 dx/dy 对刚性平移正确，却可能在 anchor 容器长高后仍落在旧高度内，导致 complete + 截断。现在额外记录初始 width/height 和四边 inset，每次解析比较初始尺寸；超过 `1/64 CSS px` 的宽高变化作为 layout 错误。没有启用 edge affinity，不猜测 reflow 后像素对应的语义位置。
+## 新运行模型与定向覆盖
 
-选区提交和 PREPARE 先检查 viewport；锚点在 prepare 后的 Attempt 内解析，保证捕获前尺寸变化也进入一次重试。捕获中检出变化先关闭临时 canvas/offscreen，再重试解析；原始尺寸基准不变，稳定的新尺寸仍明确失败并要求重新点选。已有节点丢失、viewport/zoom、数字坐标保护保留。
+首帧提交前最多三次有界采样，采用当前 coherent region。尺寸不变用 exact offset，resize 使用 crop-corner edge affinity 或 ratio。纯平移映射回本次画布坐标系，帧前／后几何移动最多重采两次。首次已建立画布后的尺寸变化先关闭 offscreen，再建立 Attempt 2；新尺寸可成为基线。Attempt 2 仍变化明确失败。
 
-新增 Node 7 项：初始尺寸／四边距离及平移、宽高增减、亚像素 resize、连续解析不重置基准、删除锚点与数字 fallback。新增 Chrome 5 场景：容器底部 padding 点选在纯平移后仍成功；向上平移且原始数字下边界超出缩短后的 document 时仍正确解析并成功；容器在开始前、提交首帧后、captureVisibleTab 期间插入 300 px 内容时均一次重试后明确失败。测试断言 parts=0、无 result、downloads 数量不增、offscreen 清空和滚动恢复。成功的容器平移用五个 marker 的完整 2400 行及尾部 padding 逐像素比较；resize 场景采用任务包允许的 fail-closed 结果，不产生可漏掉 BOTTOM 的成功 PNG。
+Region settle 只比较滚动与解析后的区域几何、可见图片就绪；不扫描全部 DOM，不要求 document 或 client 尺寸静止。真实 bitmap 决定 source scale。状态诊断保留 reasonCode、attempt、环境 baseline/actual/delta、anchor connected/before/current/point/mode 和区域 before/current。
 
-## 根因与修复边界
-
-旧 Region 同时存在两个问题：把全局 document width/height 当作不变量，以及在 prepare 改变布局后继续使用选择时的绝对矩形。前者误拒绝无关 banner／底部模块变化；后者可能输出完整尺寸却只覆盖原内容的一部分。
-
-两角点选现保存运行时 Element 引用、局部 offset 和初始坐标；隐藏扩展 UI 后命中真实 DOM。prepare 生效后解析最终 Region，每帧重新解析锚点并校验局部节点身份、相对几何、直接文本、图片来源。正文整体平移时，实际视口映射回本次画布坐标系。截图调用过程中发生平移则丢弃未提交帧，最多重采两次。
-
-局部 scope 实质变化会销毁临时画布并重试整个 Attempt 一次，再次变化明确失败。锚点删除／替换或不可见时要求重新选择；viewport／zoom 变化仍拒绝。全局尺寸变化本身不终止 Region，Full Page 保留原有全局尺寸保护。数字编辑清除两角锚点，使用 coordinate fallback；只点选一角也属于固定数字边界。
-
-## 动态 fixture 与内容身份验收
-
-文件：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`。
-
-上方 `dynamic-banner-zone` 每 600 ms 替换 banner child，并在 120／220／40 px 间循环；稳定 `target-article` 包含五个固定 canvas 段：TOP_MARKER、CHECKPOINT_1/2/3、BOTTOM_MARKER。底部区独立增长，也测试选区外宽度变化。全部文字与逐行 RGB 编码由本地脚本绘制，不依赖网络资源。
-
-测试通过实际两角 UI 选取 499×2399 CSS px 内容。开始点选前保存五段参考像素；成功输出解码后，**每一行的全部 RGBA 像素**与原始参考比较，包括 marker 文字、两侧、各拼接缝和尾部。不以 `complete`、尺寸或某个绝对 Y 代替内容身份验证。
-
-| 场景 | 验收 |
+| Fixture / 测试 | 验证内容 |
 | --- | --- |
-| 点选后、开始前 banner 改高 | 单 PNG 与原始参考逐像素一致 |
-| prepare 隐藏 fixed 元素引起 CSS 布局移动 | 最终 Region 在 prepare 后解析；PNG 一致，结束后样式恢复 |
-| capturing 后启动持续 banner 插入／删除／改高 | 连续完成，各段与原始参考一致 |
-| 选区外底部持续增长及变宽 | Region 成功，内容身份一致 |
-| 在 captureVisibleTab 调用中注入平移 | 未提交帧重采一次，整图不重启，PNG 一致 |
-| 正文内部节点一次替换（内容像素相同） | 检出 DOM 身份变化，丢弃画布并重启一次，PNG 一致 |
-| 已提交首帧后删除底部锚点 | 明确失败、零 PNG、清理 offscreen、恢复滚动 |
-| 点选后编辑数字，再改变 banner | 清除锚点；输出保持原 document 坐标，首部是新的 banner，证明 fallback 语义 |
-| 截图前删除顶部锚点 | 明确提示锚点失效、零 PNG |
-| 正文内部每 150 ms 改高 | 最多一次 Attempt 重试后以所选内容持续变化失败，零 PNG |
-| 点选后改变 Chrome zoom | 以视口／缩放变化失败 |
+| dynamic region | banner 持续插删／平移、底部增长、向上平移、选区外变宽，全部参考像素一致 |
+| dynamic region 容器 padding 锚点 | before/bitmap/committed 三种时机插入 300px，BOTTOM 仍完整，新增空间和尾部 padding 全行验证 |
+| dynamic region repeated | Attempt 2 已提交帧后再次增高明确失败；150ms 持续 reflow 有界失败；零 PNG |
+| CSDN-like | 长文章、fixed header、sticky sidebar、banner、lazy ad、外部延迟插删、overflow/scrollbar gutter、document 增高；同屏／跨屏成功 |
+| CSDN-like client/DPR | 真实 overflow 改动之外，在 content 隔离世界模拟 clientWidth/clientHeight/DPR（兼容 macOS overlay scrollbar）；bitmap 保持有效，成功且诊断记录变化 |
+| CSDN-like resize | 已提交帧后一次容器增高，Attempt 2 使用新区域，完整 marker／新增 300px／尾部 padding 验证 |
+| CSDN-like environment | 实际窗口 innerWidth、Chrome tab zoom 变化失败；隔离世界模拟 visualScale 变化失败；断言 reasonCode、attempt、baseline/actual/delta；目标 tab 切换无 PNG |
+| Chat-like | flex/grid shell、message 容器、fixed header、sticky composer；旧 position rewrite 确实使锚点宽度 500→499.5px，新策略保持尺寸 |
+| Chat-like same view | 无用户滚动，两角都在当前视口，成功且所有输出像素与参考一致 |
+| Chat-like cross screen | 多屏两角，TOP／三处 CHECKPOINT／BOTTOM 全部逐行逐像素一致 |
+| anchor failure | 删除底部锚点后明确失败，诊断包含 connected=false、mode、原／当前 rect；清理 offscreen、恢复滚动 |
 
-## 完整回归矩阵
+成功场景读取真实 `captureVisibleTab` → offscreen → downloads 的 PNG。动态及新增 fixture 按全部 RGBA 行比较参考 canvas，含文字、裁剪边缘、拼接缝、底部，不能仅凭 complete 或尺寸通过。外部红色 banner、青色 sidebar 不得进入 crop。没有访问或声称真实 CSDN／ChatGPT 页面通过。
 
-本轮下列全部复跑通过（退出码 0）：Node 32/32，动态 Chrome 16 场景，以及基础、输出/UI、复杂 fixture、原生 Retina 2× 四组 Chrome。最终选区提交路径调整后另行复跑完整动态组及 Node 全套。
+## 最终完整回归
 
-- **Node 32/32**：几何、横纵块、fractional scale／DPR、画布预算、五档输出、offscreen 解码／编码失败及串行清理、过期消息、background ready 恢复；新增 Region 全局尺寸容忍／局部 scope 拒绝和刚性平移后的视口换算测试。
-- **基础 Chrome**：1500×10337 Full Page 单 PNG 逐行验证，实际跨屏两角点选，125% zoom、模拟 DPR 与 native bitmap 差异，取消／并发／stale message，lazy 高度 1800→2800，worker 强制终止恢复、下载拒绝恢复。
-- **动态 Chrome**：上表 11 个场景，加本轮 5 个容器 anchor 场景。
-- **输出／UI Chrome**：Auto、CSS 100%、75%、50%、Device；逐像素检查进度层不进入 PNG；实际保存路径、Finder 按钮正确 download ID、页面取消／完成后关闭；26,000 px 页 Auto 单图缩小到预算，固定比例和极端高度首帧前拒绝。
-- **复杂 fixture Chrome**：保留根目录现有 `tests/fixtures/test-complex-page.html`；整页含 18 张 lazy 图片、动态插入内容、最终底部，正文区域绿色边框每行连续；fixed/sticky 样式及原滚动恢复，数字坐标在全局增长后仍有效，非法越界拒绝、一次 scope 变化自动重试，live offscreen 时取消、stale cancel、一次 close 失败后新任务恢复。
-- **原生 Retina 2× Chrome**：设备输出 1000×3200，Auto／CSS 输出 500×1600、75% 为 375×1200、50% 为 250×800；逐行检查与真实 downloads.show 调用。
+开发期间仅运行相关 Node 和 Chrome fixture 组。最终统一执行完整矩阵一次，全部退出码 0：Node **33/33**；Chrome 基础、输出/UI、动态 Region、CSDN-like、Chat-like、复杂页面、原生 Retina **七组全部通过**。
 
-现有 complex 测试中「任何 document 增高都应拒绝 Region」的旧断言已按新语义替换；仍保留非法边界、局部变化与恢复保护，未修改原 fixture。
-
-## 复跑命令
+最终日志目录：`/tmp/region-reset-final-k80h1zvg/`（本机临时产物，不入库）。每组日志含各断言通过记录及临时 PNG 目录。
 
 ```sh
 node --test long-page-screenshot-v2/tests/*.test.mjs
-DYNAMIC_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 node long-page-screenshot-v2/tests/browser.mjs
 OUTPUT_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+DYNAMIC_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+RELIABILITY_ONLY=csdn node long-page-screenshot-v2/tests/browser.mjs
+RELIABILITY_ONLY=chat node long-page-screenshot-v2/tests/browser.mjs
 COMPLEX_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 ```
 
-Node 22+；集成测试需要 Playwright、pngjs 和支持扩展调试协议的 Chrome。可通过 `NODE_PATH` 指定包目录，`CHROME_EXECUTABLE` 指定浏览器。`HEADED=1` 显示测试窗口；每组打印临时产物目录。原生 2× 的 `downloads.show` 会调用系统文件定位 API。
+集成需要 Playwright、pngjs 和可加载扩展的 Chrome。用 NODE_PATH 指向包目录，CHROME_EXECUTABLE 指向浏览器，HEADED=1 可显示测试窗口。测试输出临时产物位置；不提交 profile、截图或下载文件。
 
-手动复现可在仓库根目录运行 `python3 -m http.server 8000 --bind 127.0.0.1`，打开 `/long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，跨屏点选正文，在页面控制台执行 `startBanners()`，再开始截图。正文五个 marker 应连续出现且无外部红色 banner／青色底部模块。`stopBanners()` 停止定时器，刷新可重置 fixture。
+保留基础 Full Page 横纵块及 10337 行、125% zoom、模拟 DPR 与 native bitmap 差异、Auto/CSS/75/50/device、单 PNG、进度层不入图、实际保存路径／Finder API、取消／stale message／worker 恢复、复杂 lazy 页面及 fixed/sticky 恢复、原生 Retina 2× 检查。
 
-## 剩余限制
+## 限制
 
-锚点是 DOM 元素内的像素偏移，不是文字字符位置；点击空白容器不能推断正文语义。锚点自身尺寸改变会触发一次重试，仍偏离选择时尺寸则明确失败，需重新点选；没有实现边缘跟随。相同外框尺寸内的语义重排仍依赖原有 scope 检查。每次检查比较当前局部 scope，不能证明两个检查之间瞬间变化后恢复的绘制一致性；Canvas／视频、仅 CSS 视觉变化、Shadow DOM 内部变化也不在保证范围。原有 fixed/sticky 启发式、虚拟列表、独立滚动容器和 iframe 限制保留。
+视觉点锚定不是文字语义锚定；元素被替换仍需重选。虚拟列表、独立滚动容器、iframe、Shadow DOM 内部捕获与无限 feed 不在本轮范围。相同区域外框内的语义替换或 Canvas／视频变化无法由几何验证保证一致；不再宣称全 DOM fingerprint 能证明内容稳定。固定数字坐标不跟随内容 reflow。可观察的持续区域几何变化会失败，不输出伪成功 PNG。
 
-没有测量浏览器总 RSS；验证的是单画布尺寸预算及资源释放。没有自动化驱动系统原生保存对话框或检查 Finder 窗口视觉状态；实际路径和 downloads.show API 已覆盖。性能历史对比见上一基线版本的 TESTING.md，本轮不以修复前的数据声称新性能收益。
+未自动化系统原生保存对话框和 Finder 窗口视觉状态；验证真实下载路径及 downloads.show API。未测量浏览器总 RSS；画布预算及释放仍有回归覆盖。测试均为确定性本地 fixture，不是外网实站认证。

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-export async function testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG }) {
+export async function testDynamicRegion({ page, worker, waitFor, capture, PNG }) {
   const reference = (await page.evaluate(() => [...document.querySelectorAll('canvas')].map(c => c.toDataURL().split(',')[1])))
     .map(data => PNG.sync.read(Buffer.from(data, 'base64')));
   const select = async (container = false) => {
@@ -15,19 +15,20 @@ export async function testDynamicRegion({ page, worker, message, waitFor, captur
     await page.mouse.click(579, container ? 509 : 499);
   };
   const start = () => page.mouse.click(811, 245);
-  const verify = async (result, container = false) => {
+  const verify = async (result, container = false, grown = false) => {
     assert.equal(result.state, 'complete', JSON.stringify(result));
     assert.equal(result.parts, 1);
     const png = PNG.sync.read(await readFile(result.result.filename));
-    assert.equal(png.width, 499);assert.equal(png.height, container ? 2409 : 2399);
+    assert.equal(png.width, 499);assert.equal(png.height, (container ? 2409 : 2399) + (grown ? 300 : 0));
     // Compare the entire output to immutable pre-selection canvas pixels,
     // including TOP/CHECKPOINT/BOTTOM text, both edges and every seam row.
     for(let y=0;y<png.height;y++) {
-      if (y >= 2400) {
+      if (y >= 2400 + (grown ? 300 : 0) || (grown && y >= 1920 && y < 2220)) {
         for (let x=0;x<png.width;x++) assert.deepEqual([...png.data.subarray((y*png.width+x)*4,(y*png.width+x+1)*4)], [224,0,224,255]);
         continue;
       }
-      const expected=reference[Math.floor(y/480)], source=(y%480)*expected.width*4;
+      const row = grown && y >= 2220 ? y - 300 : y;
+      const expected=reference[Math.floor(row/480)], source=(row%480)*expected.width*4;
       assert.deepEqual(png.data.subarray(y*png.width*4,(y+1)*png.width*4),
         expected.data.subarray(source,source+png.width*4), `content row ${y}`);
     }
@@ -45,15 +46,6 @@ export async function testDynamicRegion({ page, worker, message, waitFor, captur
   console.log('PASS upward translation resolves anchors even when old numeric bottom exceeds document');
   // Both points use the real picker; the lower point hits article padding,
   // not the fixed-size BOTTOM canvas. Growth moves the marker past old dy.
-  const assertResizeFailure = async result => {
-    assert.equal(result.state, 'failed', JSON.stringify(result));
-    assert.match(result.message, /锚点尺寸已变化/);
-    assert.equal(result.metrics.retries, 1);
-    assert.equal(result.parts, 0);
-    assert.equal(result.result, undefined);
-    assert.equal((await worker.evaluate(() => chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']}))).length, 0);
-    assert.deepEqual(await page.evaluate(() => [scrollX, scrollY]), [0, 0]);
-  };
   for (const timing of ['before', 'committed', 'bitmap']) {
     await reset();await select(true);
     const downloadsBefore = await worker.evaluate(async () => (await chrome.downloads.search({})).length);
@@ -73,9 +65,11 @@ export async function testDynamicRegion({ page, worker, message, waitFor, captur
       assert.equal((await worker.evaluate(() => chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']}))).length, 1);
       await page.evaluate(() => growArticle());
     }
-    await assertResizeFailure(await waitFor(s => !s.busy));
-    assert.equal(await worker.evaluate(async () => (await chrome.downloads.search({})).length), downloadsBefore);
-    console.log(`PASS article padding anchor resize ${timing}: one retry, explicit failure, no downloaded PNG, canvas cleaned`);
+    const resized = await waitFor(s => !s.busy);
+    await verify(resized, true, true);
+    assert.equal(resized.metrics.retries, timing === "committed" ? 1 : 0);
+    assert.equal(await worker.evaluate(async () => (await chrome.downloads.search({})).length), downloadsBefore + 1);
+    console.log(`PASS article padding anchor resize ${timing}: new coherent baseline, complete markers and every row`);
   }
   await reset();await select();
   await page.evaluate(() => changeBanner());
@@ -128,14 +122,19 @@ export async function testDynamicRegion({ page, worker, message, waitFor, captur
     replacement.getContext('2d').drawImage(old,0,0);old.replaceWith(replacement);
   });
   const restarted=await waitFor(s=>!s.busy);await verify(restarted);
-  assert.equal(restarted.metrics.retries,1);
-  console.log('PASS local node replacement discards canvas and succeeds after one restart');
+  assert.equal(restarted.metrics.retries,0);
+  console.log('PASS unrelated node replacement succeeds without scope fingerprint or restart');
 
   await reset();await select();await start();await waitFor(s=>s.state==='capturing');
   await page.evaluate(()=>document.getElementById('BOTTOM_MARKER').remove());
   const lostDuringCapture=await waitFor(s=>!s.busy);
   assert.equal(lostDuringCapture.state,'failed');assert.match(lostDuringCapture.message,/锚点已失效/);
   assert.equal(lostDuringCapture.parts,0);
+  assert.equal(lostDuringCapture.reasonCode,"ANCHOR_UNRESOLVABLE");
+  assert.equal(lostDuringCapture.diagnostics.anchors.second.connected,false);
+  assert.equal(lostDuringCapture.diagnostics.anchors.second.mode,"unresolvable");
+  assert.ok(lostDuringCapture.diagnostics.anchors.second.before);
+  assert.ok(lostDuringCapture.diagnostics.anchors.second.current);
   assert.equal((await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']}))).length,0);
   assert.deepEqual(await page.evaluate(()=>[scrollX,scrollY]),[0,0]);
   console.log('PASS anchor loss after committed frame fails without PNG and restores');
@@ -149,6 +148,17 @@ export async function testDynamicRegion({ page, worker, message, waitFor, captur
   assert.deepEqual([...numericPNG.data.subarray(0,3)],[255,0,0]);
   console.log('PASS manual numeric edit clears anchors and deliberately keeps document coordinates');
 
+  await reset();await select(true);await start();await waitFor(s=>s.state==='capturing');
+  await page.evaluate(()=>growArticle());
+  await waitFor(s=>s.attempt===2 && s.frames>0 && s.state==='capturing');
+  await page.evaluate(()=>growArticle());
+  const repeated=await waitFor(s=>!s.busy);
+  assert.equal(repeated.state,'failed',JSON.stringify(repeated));
+  assert.equal(repeated.attempt,2);assert.equal(repeated.reasonCode,'REGION_REFLOW');
+  assert.equal(repeated.parts,0);assert.equal(repeated.result,undefined);
+  assert.equal(repeated.metrics.retries,1);
+  console.log('PASS second committed reflow: Attempt 2 fails, no PNG');
+
   await reset();await select();
   await page.evaluate(()=>document.getElementById('TOP_MARKER').remove());
   await start();
@@ -161,15 +171,12 @@ export async function testDynamicRegion({ page, worker, message, waitFor, captur
     document.getElementById('CHECKPOINT_2').style.height=(++n%2?600:480)+'px';
   },150)});
   const unstable=await waitFor(s=>!s.busy);
-  assert.equal(unstable.state,'failed',JSON.stringify(unstable));assert.match(unstable.message,/所选内容本身持续变化/);
+  assert.equal(unstable.state,'failed',JSON.stringify(unstable));assert.match(unstable.message,/所选区域持续发生布局变化/);
   assert.equal(unstable.parts,0);assert.equal(unstable.metrics.retries,1);
-  console.log('PASS scope changes exhaust one retry without output');
+  console.log('PASS repeated region geometry changes exhaust one retry without output');
 
-  await reset();await select();
+  await reset();await select();await start();await waitFor(s=>s.state==='capturing');
   await worker.evaluate(async()=>{const [tab]=await chrome.tabs.query({active:true,currentWindow:true});await chrome.tabs.setZoom(tab.id,1.25)});
-  // Submit via the real content context because UI coordinates changed with zoom.
-  const state=await message({type:'STATUS'});
-  await selectRegion(state,{left:80,top:40,right:579,bottom:2439},false);
-  const zoom=await waitFor(s=>!s.busy);assert.equal(zoom.state,'failed');assert.match(zoom.message,/视口或缩放/);
-  console.log('PASS selection viewport/zoom changes rejected');
+  const zoom=await waitFor(s=>!s.busy);assert.equal(zoom.state,'failed');assert.match(zoom.message,/CAPTURE_ENV_CHANGED/);
+  console.log('PASS capture viewport/zoom changes rejected with diagnostics');
 }

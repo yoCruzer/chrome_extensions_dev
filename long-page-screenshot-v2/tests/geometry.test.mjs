@@ -61,7 +61,7 @@ test("actual clamped last viewport is cropped, not appended twice", () => {
   assert.throws(() => visibleTile(region, { ...view, y: 0 }, 0, 800));
 });
 
-test("limits fail explicitly for infinite growth, oversized width and changed zoom", () => {
+test("Full Page limits fail for infinite growth, oversized width and strict viewport changes", () => {
   checkHeight(5000, 6500, 700);
   assert.throws(() => checkHeight(5000, 20000, 700));
   assert.throws(() => outputGeometry({ x: 0, width: 20000 }, { innerWidth: 1000, innerHeight: 700 }, { width: 1000, height: 700 }));

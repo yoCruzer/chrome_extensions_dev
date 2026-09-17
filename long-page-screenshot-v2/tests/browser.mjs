@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testReliability } from "./reliability.mjs";
 import { testDynamicRegion } from "./dynamic.mjs";
 import { testComplexPage } from "./complex.mjs";
 const require = createRequire(import.meta.url);
@@ -20,7 +21,8 @@ const c=document.querySelector('canvas'),ctx=c.getContext('2d');for(let y=0;y<c.
 </script>`;
 const complexFixture = await readFile(resolve(extension, "../tests/fixtures/test-complex-page.html"), "utf8");
 const dynamicFixture = await readFile(resolve(extension, "tests/fixtures/test-dynamic-region-page.html"), "utf8");
-const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture); });
+const reliabilityFixture = process.env.RELIABILITY_ONLY ? await readFile(resolve(extension, `tests/fixtures/test-${process.env.RELIABILITY_ONLY}-like-page.html`), "utf8") : null;
+const server = createServer((req, res) => { res.setHeader("Content-Type", "text/html"); res.end(reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
   ...(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: "chromium" }),
@@ -79,7 +81,9 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.DYNAMIC_ONLY) {
+  if (process.env.RELIABILITY_ONLY) {
+    await testReliability({ page, worker, message, waitFor, capture, PNG, kind:process.env.RELIABILITY_ONLY });
+  } else if (process.env.DYNAMIC_ONLY) {
     await testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG });
   } else if (process.env.OUTPUT_ONLY) {
     const panel = page.locator("#long-screenshot-v2-progress");

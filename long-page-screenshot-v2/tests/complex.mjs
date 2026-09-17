@@ -96,16 +96,16 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   await waitFor(s => !s.busy);
   await assertRestored(before, position);
 
-  // A one-time local change restarts the numeric capture with a fresh canvas.
+  // Numeric coordinates remain fixed when content outside them changes.
   const warming = await capture('region');
   await selectRegion(warming, await regionEdges());
   await waitFor(s => s.state === 'loading');
   await page.evaluate(() => document.getElementById('grow').click());
   const warmFailure = await waitFor(s => !s.busy);
   assert.equal(warmFailure.state, 'complete', JSON.stringify(warmFailure));
-  assert.equal(warmFailure.metrics.retries, 1);
+  assert.equal(warmFailure.metrics.retries, 0);
   await assertRestored(before, position);
-  console.log('PASS invalid bounds rejected; one-time scope growth retries and restores');
+  console.log('PASS invalid bounds rejected; outside growth retains numeric coordinates and restores');
 
   // Cancel with an actual live offscreen document, then recover with a new job.
   const cancelledJob = await capture('full');

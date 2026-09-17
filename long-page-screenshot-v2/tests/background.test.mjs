@@ -47,15 +47,23 @@ const validation = source.slice(source.indexOf('function validateView'), source.
 const validationContext = { sameViewport, regionFromEdges };
 vm.runInNewContext(validation, validationContext);
 
-test('Region tolerates unrelated document dimensions but rejects viewport and local scope changes', () => {
+test('Region tolerates unrelated document dimensions but rejects only actual environment or region geometry changes', () => {
   const page = { width: 900, height: 4000, innerWidth: 900, innerHeight: 700, clientWidth: 900, clientHeight: 700, dpr: 1, visualScale: 1 };
   const region = { x: 80, y: 40, width: 500, height: 2400 };
-  const s = { mode: 'region', viewport: page, selectionPage: page, region, scope: 'stable-content' };
+  const s = { mode: 'region', tab:{id:1}, environment:{...page,tabId:1,tabZoom:1}, viewport: page, region, scope: 'stable-content' };
   const moved = { ...page, width: 1400, height: 9000, region: { ...region, y: 220 }, scope: s.scope };
   assert.doesNotThrow(() => validationContext.validateView(s, moved));
-  assert.throws(() => validationContext.validateView(s, { ...moved, dpr: 2 }), /视口或缩放/);
-  assert.throws(() => validationContext.validateView(s, { ...moved, scope: 'replaced-content' }), error => error.layout === true);
-  assert.throws(() => validationContext.validateView(s, { ...moved, region: { ...region, height: 2500 } }), /所选内容本身持续变化/);
+  assert.doesNotThrow(() => validationContext.validateView(s, { ...moved, dpr: 2, clientWidth:880, clientHeight:680 }));
+  assert.doesNotThrow(() => validationContext.validateView(s, { ...moved, scope: 'replaced-content' }));
+  for (const field of ['innerWidth','innerHeight','tabZoom','visualScale','tabId']) {
+    assert.throws(() => validationContext.validateEnvironment(s, {...s.environment,[field]:s.environment[field]+1}), e => {
+      assert.equal(e.reasonCode,'CAPTURE_ENV_CHANGED');
+      assert.equal(e.diagnostics.delta.field,field);
+      assert.equal(e.diagnostics.delta.expected,s.environment[field]);
+      return true;
+    });
+  }
+  assert.throws(() => validationContext.validateView(s, { ...moved, region: { ...region, height: 2500 } }), /所选区域持续发生布局变化/);
   assert.throws(() => validationContext.validateView({ ...s, mode: 'full' }, moved), /页面宽度/);
 });
 
