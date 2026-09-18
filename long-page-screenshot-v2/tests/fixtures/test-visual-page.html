@@ -22,7 +22,7 @@ if(['github','sidebar'].includes(kind)) {document.querySelector('#island').style
 let changed=false;
 addEventListener('scroll',()=>{
  if(changed||scrollY<100)return;changed=true;
- if(kind==='github'||kind==='global')document.querySelector('#spacer').style.height=(kind==='github'?45:80)+'px';
+ if(kind==='github'||kind==='global'||kind==='clean-shift')document.querySelector('#spacer').style.height=(kind==='global'?80:45)+'px';
  if(kind==='sidebar'){document.querySelector('#island').style.transform='translateY(20.617px)';ctx.fillStyle='#d09030';ctx.fillRect(0,0,180,c.height)}
  if(kind==='ad'){ctx.fillStyle='#f0c020';ctx.fillRect(0,0,240,c.height)}
  if(kind==='islands'){ctx.fillStyle='#30c060';ctx.fillRect(0,0,100,c.height);ctx.fillRect(800,0,100,c.height)}

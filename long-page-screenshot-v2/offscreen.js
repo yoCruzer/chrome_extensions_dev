@@ -88,7 +88,7 @@ async function handle(m) {
     const bitmap = await decode(m.dataUrl);
     try {
       const scale = outputGeometry(m.region, m.view, bitmap, m.output);
-      session = { id: m.id, region: m.region, scale, output: m.output, view: m.view, bitmapWidth: bitmap.width, bitmapHeight: bitmap.height };
+      session = { continuityPolicy: m.continuityPolicy === "strict" ? "strict" : "robust", id: m.id, region: m.region, scale, output: m.output, view: m.view, bitmapWidth: bitmap.width, bitmapHeight: bitmap.height };
       return scale;
     } finally { bitmap.close(); }
   }
@@ -117,12 +117,12 @@ async function handle(m) {
       if (m.firstColumn && session.previous) {
         const expected = m.view.y - session.previous.documentY;
         const current = strip(bitmap, m.view, false, session.previous.strip.start - Math.max(1, expected - VISUAL.radius));
-        if (!m.uncertain) visual = matchVertical(session.previous.strip, current, expected, true);
+        if (!m.uncertain) visual = matchVertical(session.previous.strip, current, expected, true, session.continuityPolicy);
         if (!visual || visual.result !== 'matched' || visual.correction !== 0) {
-          visual = { ...matchVertical(session.previous.strip, current, expected), path: 'recovery' };
+          visual = { ...matchVertical(session.previous.strip, current, expected, false, session.continuityPolicy), path: 'recovery' };
         } else visual.path = 'fast';
         if (visual.result !== 'matched') {
-          anchored = m.bottomExtent !== undefined && bottomTail(m.view, session.previous.end, m.bottomExtent);
+          anchored = session.continuityPolicy !== "strict" && m.bottomExtent !== undefined && bottomTail(m.view, session.previous.end, m.bottomExtent);
           if (!anchored) return { accepted: false, visual, canonicalEnd: session.previous.end };
         }
         canonicalY = anchored ? anchored.canonicalY : session.previous.canonicalY + visual.matchedOffset;

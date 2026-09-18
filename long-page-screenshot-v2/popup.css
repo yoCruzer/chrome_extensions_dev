@@ -3,3 +3,8 @@ h1 { font-size: 21px; margin: 0 0 8px; } h1 span { font-size: 12px; color: #5166
 button { display: block; width: 100%; border: 0; border-radius: 7px; margin: 10px 0; padding: 11px; font: inherit; cursor: pointer; background: #225fd5; color: white; }
 button:disabled { opacity: .55; cursor: wait; } #region { background: #dce8fe; color: #173e81; } #cancel { background: #a63138; }
 #status { min-height: 42px; } .hint { font-size: 12px; color: #53657c; } [hidden] { display: none; }
+
+fieldset { margin: 12px 0; padding: 8px 10px; border: 1px solid #dce3ee; border-radius: 7px; }
+legend { font-weight: 600; } #continuity label { display: block; margin: 4px 0; font-size: 13px; }
+#continuity small { display: block; font-size: 11px; line-height: 1.4; color: #53657c; }
+#continuity label small { margin-left: 23px; } #preference-status { color: #a63138 !important; }

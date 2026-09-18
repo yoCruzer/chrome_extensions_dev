@@ -110,3 +110,14 @@ test('horizontal columns use the successfully repositioned visual band after rec
   assert.equal(frames[recovered + 1].x, 800);
   assert.equal(s.full.visual.visualFailures, 0);
 });
+
+test('START validates Full Page policy and omits it for Region', async () => {
+ const startSource=source.slice(source.indexOf('async function start('),source.indexOf('async function ensureVisible'));
+ for(const [mode,input,expected] of [['full','strict','strict'],['full','robust','robust'],['full','broken','robust'],['full',undefined,'robust'],['region','strict',undefined]]){
+  let session;
+  const context={active:null,crypto:{randomUUID:()=> 'policy'},chrome:{tabs:{query:async()=>[{id:1,url:'https://fixture.test'}]},scripting:{executeScript:async()=>{}}},
+   status:async s=>{session=s},request:async()=>{},run:()=>{},setInterval:()=>0,finish:async()=>{}};
+  vm.runInNewContext(startSource,context);await context.start(mode,'css',input);
+  assert.equal(session.continuityPolicy,expected);
+ }
+});

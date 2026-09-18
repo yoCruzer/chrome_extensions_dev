@@ -115,6 +115,12 @@ API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 
 ### Full Page Visual Continuity
 
+Popup「整页连续性」默认使用 **Robust / 智能容错**，保留原多数 tile 共识和 terminal bottom-tail 行为。用户可显式选择 **Strict / 全宽严格**：同一 matcher 的 Robust candidate 成功后，对同一 offset 追加左／中／右（tiles 0–2／3–8／9–11）检查；每个有信息分区至少 2/3 tiles 同意，无信息分区中立通过（agreementRatio 为 null）。Strict 只增加门槛，不改变搜索或放宽匹配；失败沿用最多两次恢复，最终 `VISUAL_CONTINUITY_FAILED` 且不保存 PNG。Strict 不使用 terminal bottom fallback，因此动态页面可能更容易失败。Region 不受影响。
+
+「记住此域名」仅在 `chrome.storage.local.continuitySitePoliciesV1` 保存 lowercase exact hostname → robust/strict；不存 URL、路径、标题，不做 wildcard，也没有 GitHub/CSDN 硬编码。勾选立即保存，已勾选时切换立即更新，取消则删除；未记忆时下次恢复 Robust。保存失败只提示，不影响本次所选截图模式。
+
+最终 diagnostics 保留 `continuityPolicy`；`diagnostics.visual` 另含 `continuityPolicy`、`strictCoverageChecks`、`strictCoverageFailures`。Strict trace 记录 `policy` 和三个 zones 的 informativeTiles、agreeingTiles、agreementRatio、pass；只统计最终返回的 matcher 检查，不含 hostname 或图像内容。
+
 原则：证明相邻截图可可靠对齐，不证明网页从未变化。Region 的滚动、锚点、裁剪和重试流程不使用 matcher。没有 OCR、AI/ML、第三方 CV、正文识别或站点 selector。
 
 - 重叠：`min(clientHeight - 32, clamp(clientHeight * 0.25, 160, 320))` CSS px；常规 700px 视口每次前进 525px。小视口保留至少 32px 前进空间。
@@ -122,7 +128,7 @@ API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 - 搜索：12 个横向 tiles，预计位移 ±96 CSS px，每个候选使用相同的行区间；不做旋转、缩放或横向注册。稳定几何 fast path 每 tile 最多采 24 行、横向每 6 个表示像素一取样。发现 witness／extent 变化、非零修正或快速检查不通过，改为最多 64 行、横向每 2 个表示像素取样。两条路径均检查第二候选；普通中间帧不能用 geometry 绕过低信息或歧义拒绝。
 - 共识：灰度标准差至少 5，采样行间的平均垂直变化至少 0.05（排除只在横向有边框、纵向恒定的 tile）；至少 3 个 informative tiles，且至少 60% 同意同一个整数 CSS 位移。最佳归一化平均绝对误差 ≤0.04，灰度及最佳候选 RGB 平均误差均 ≤0.5（0–255）。第二候选误差差距至少 `min(0.018, max(0.005, bestError * 0.5))`；近乎精确匹配允许较小差距，噪声近似匹配不能靠相邻 offset 猜测。分数为 `1/(1+error)`，confidence 为 agreementRatio × bestScore。
 - canonical 坐标：首帧起点 0；后续为上一帧 canonicalY + matchedOffset。只绘制上次 committed end 之后的部分，源裁剪仍使用当前目标视口。文档高度用于滚动终点和增长保护，最终 PNG 高度按 canonical end 裁定，不加入因坐标修正产生的空白尾带。
-- 失败：第一次重试在原位置重新 settle/capture；第二次后退一个有界 overlap（最多 320px），增加共享内容。两次后仍无可靠匹配则停止，不重启整个截图、不输出部分 PNG；唯一例外是下方经过验证的 terminal bottom tail。目标丢失、导航、环境变化和无限增长保护继续生效；容器 viewport resize 仍使用原有一次重建策略。
+- 失败：第一次重试在原位置重新 settle/capture；第二次后退一个有界 overlap（最多 320px），增加共享内容。两次后仍无可靠匹配则停止，不重启整个截图、不输出部分 PNG；Robust 的唯一例外是下方经过验证的 terminal bottom tail。目标丢失、导航、环境变化和无限增长保护继续生效；容器 viewport resize 仍使用原有一次重建策略。
 - 横向超宽页：每个纵向 band 的首列建立视觉注册，其它横向列沿用该 band 的 canonical 坐标和原有几何裁剪。因此对跨列独立纵向变形不作保证；主要模型仍是纵向截图。
 
 `diagnostics.visual` 包含 `visualChecks`、`visualFastPath`、`visualRecoveries`、`visualRecoveryRetries`、`visualFailures`、`ambiguousMatches`、`lowInformationRejects`，及最近 150 次匹配 trace（预计／实际位移、修正、搜索半径、重叠、tile 数、共识比例、两候选分数、confidence、path、result）。复制诊断包含这些安全数值，不包含像素、页面文本、HTML、URL、图片数据。
@@ -134,7 +140,7 @@ API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 
 ### Full Page Terminal Bottom Tail
 
-最后只能滚动几像素时，大面积 overlap 可能缺乏唯一视觉证据。保留原 matcher 的 ±96、12 tiles、至少 3 tiles、60% 共识、margin 及 RGB 验证；正常匹配始终优先。仅在首列视觉匹配失败／ambiguous／low-information 后，才检查 terminal bottom anchor：
+最后只能滚动几像素时，大面积 overlap 可能缺乏唯一视觉证据。保留原 matcher 的 ±96、12 tiles、至少 3 tiles、60% 共识、margin 及 RGB 验证；正常匹配始终优先。仅在 Robust 首列视觉匹配失败／ambiguous／low-information 后，才检查 terminal bottom anchor：
 
 - CaptureTarget 当前可见底边与最终 extent 相差不超过 0.01 CSS px；window 和 element 使用同一目标坐标检查，底边在 bitmap 外的裁剪容器不能通过。
 - `0 < finalExtent - canonicalCommittedEnd <= min(overlapCSS(clientHeight), 320)`，已有非空提交内容；普通中间帧和大缺口不能使用此路径。
@@ -145,4 +151,4 @@ Canonical 映射为 `canonicalY = finalExtent - viewportHeight`、`novelTop = ca
 
 `diagnostics.visual` 新增 `bottomTailChecks`、`bottomTailAccepted`、`bottomTailRejected`；一次检查未使用 anchor（包括新截图已视觉匹配）计入 rejected。接受时 trace 记录 `event=bottom-tail-anchored`、`result=BOTTOM_ANCHORED_TAIL`、原 `visualResult`、finalExtent、canonicalEndBefore、remainingTail、actualTargetScrollY、maxTargetScrollY、viewportHeight 和 novelPixels。正常视觉成功不标记 fallback，任务仍以正常成功结束；原复制诊断入口保留。
 
-GitHub 多数 tiles 确定的一维全局对齐可能让少数动态 sidebar／toolbar 留下局部 seam artifact。本轮只解决严格底部小尾段，不增加 per-tile 坐标、seam carving 或语义侧栏识别。底部稳定仍是有界时间观测，不保证未来不再加载；不追溯改写已提交前缀，也不保证任意动态内容的最终时刻快照。Region runtime 和 CaptureTarget detection 未改变。
+GitHub 多数 tiles 确定的一维全局对齐可能让少数动态 sidebar／toolbar 留下局部 seam artifact。Robust 保留底部小尾段策略；Strict 可拒绝此类局部冲突，但不增加 per-tile 坐标、seam carving 或语义侧栏识别。底部稳定仍是有界时间观测，不保证未来不再加载；不追溯改写已提交前缀，也不保证任意动态内容的最终时刻快照。Region runtime 和 CaptureTarget detection 未改变。

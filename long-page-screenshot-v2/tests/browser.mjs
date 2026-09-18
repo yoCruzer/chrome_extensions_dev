@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import { testBottomTail } from "./bottom-tail.mjs";
+import { testPolicy } from "./policy.mjs";
 import { testVisual } from "./visual.mjs";
 import { testFullNested } from "./full-nested.mjs";
 import { testProof } from "./proof.mjs";
@@ -32,7 +33,7 @@ const reliabilityFixture = process.env.RELIABILITY_ONLY ? await readFile(resolve
 const nestedFixture = (process.env.NESTED_ONLY || process.env.FULL_NESTED_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-nested-page.html"), "utf8") : null;
 const adaptiveFixture = (process.env.ADAPTIVE_ONLY || process.env.DIAGNOSTICS_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-adaptive-page.html"), "utf8") : null;
 const bottomTailFixture = process.env.BOTTOM_TAIL_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-bottom-tail-page.html"), "utf8") : null;
-const visualFixture = process.env.VISUAL_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-visual-page.html"), "utf8") : null;
+const visualFixture = (process.env.VISUAL_ONLY || process.env.POLICY_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-visual-page.html"), "utf8") : null;
 const proofFixture = process.env.PROOF_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-proof-page.html"), "utf8") : null;
 const server = createServer((req, res) => {
   if (req.url.startsWith('/lazy.svg')) {
@@ -69,7 +70,7 @@ try {
     }
     throw new Error("Timed out waiting for capture state");
   };
-  const capture = async (mode, output = "auto") => {
+  const capture = async (mode, output = "auto", continuityPolicy) => {
     await page.bringToFront();
     const { targetInfos: tabs } = await browserCDP.send("Target.getTargets", { filter: [{ type: "tab" }] });
     const targetInfo = tabs.find(tab => tab.type === "tab" && tab.url === page.url());
@@ -85,7 +86,7 @@ try {
       }
     }
     await controlCDP.detach();
-    const result = await message({ type: "START", mode, output });
+    const result = await message({ type: "START", mode, output, continuityPolicy });
     assert.equal(result.ok, true, JSON.stringify(result));
     return result;
   };
@@ -98,7 +99,9 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.BOTTOM_TAIL_ONLY) {
+  if (process.env.POLICY_ONLY) {
+    await testPolicy({ page, worker, control, context, id, waitFor, capture, selectRegion, PNG });
+  } else if (process.env.BOTTOM_TAIL_ONLY) {
     await testBottomTail({ page, worker, waitFor, capture, PNG });
   } else if (process.env.VISUAL_ONLY) {
     await testVisual({ page, worker, waitFor, capture, PNG });

@@ -48,3 +48,18 @@ test('vertical borders alone do not inflate informative tile count',()=>{
  const result=matchVertical(frame(0,undefined,pattern),frame(525,undefined,pattern),525);
  assert.equal(result.result,'matched');assert.equal(result.informativeTiles,8);assert.equal(result.agreeingTiles,8);
 });
+for (const policy of ['robust', 'strict']) test(`policy ${policy}: minority left conflict`, () => {
+ const a=frame(0),b=frame(525,(x,y)=>x<30?(y*19+x)%255:null);
+ const result=matchVertical(a,b,525,false,policy);
+ assert.equal(result.result,policy==='robust'?'matched':'strict-coverage-failed');
+ if(policy==='strict'){assert.equal(result.zones.left.pass,false);assert.equal(result.zones.center.pass,true);assert.equal(result.zones.right.pass,true)}
+});
+test('strict full-width correction and blank neutral zone',()=>{
+ for(const blank of [false,true])for(const fast of [false,true]){
+  const mutate=(x)=>blank&&x<30?255:null;
+  const result=matchVertical(frame(0,mutate),frame(480,mutate),525,fast,'strict');
+  assert.equal(result.result,'matched');assert.equal(result.correction,-45);
+  assert.ok(Object.values(result.zones).every(zone=>zone.pass));
+  if(blank){assert.equal(result.zones.left.informativeTiles,0);assert.equal(result.zones.left.agreementRatio,null)}
+ }
+});

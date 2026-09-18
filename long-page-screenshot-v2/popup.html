@@ -2,6 +2,12 @@
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>长截图 V2</title><link rel="stylesheet" href="popup.css"></head>
 <body><h1>长截图 <span>V2</span></h1><p>整页保存，或只保留你选择的区域。</p>
 <label>输出尺寸 <select id="output"><option value="auto">自动 · 单图优先</option><option value="css">网页 100%</option><option value="75">75%</option><option value="50">50%</option><option value="device">原始设备分辨率</option></select></label>
+<fieldset id="continuity" disabled><legend>整页连续性</legend>
+<label><input type="radio" name="policy" id="robust" value="robust" checked>智能容错（推荐）<small>优先保证稳定主体内容，允许少量动态区域变化</small></label>
+<label><input type="radio" name="policy" id="strict" value="strict">全宽严格<small>左、中、右区域都需要可靠连续，动态页面可能更容易失败</small></label>
+<label><input type="checkbox" id="remember" disabled>记住此域名的选择</label>
+<small id="hostname"></small><small>仅影响“整页截图”，区域截图不受影响。</small>
+<small id="preference-status" role="status"></small></fieldset>
 <button id="full">截取整页</button><button id="region">选择截图区域</button><button id="cancel" hidden>取消任务</button>
 <p id="status" role="status" aria-live="polite">准备就绪</p><p class="hint">截图时保持当前标签页和缩放不变。Esc 可取消。默认保存一张 PNG。完成后在页面查看实际路径。</p>
 <script src="popup.js"></script></body></html>

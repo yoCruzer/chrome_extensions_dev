@@ -6,9 +6,11 @@ export const VISUAL = Object.freeze({ tiles: 12, maxWidth: 384, sampleX: 4,
 export const overlapCSS = height => Math.min(height - 32, Math.max(160, Math.min(320, height * 0.25)));
 
 // Frames contain only bounded top/tail strips, never complete screenshot history.
-export function matchVertical(previous, current, expectedOffset, fast = false) {
+export function matchVertical(previous, current, expectedOffset, fast = false, policy = 'robust') {
   const radius = VISUAL.radius, width = previous.width;
-  const base = { expectedOffset, matchedOffset: null, correction: null, searchRadius: radius,
+  policy = policy === 'strict' ? 'strict' : 'robust';
+  const informative = [];
+  const base = { policy, expectedOffset, matchedOffset: null, correction: null, searchRadius: radius,
     overlapHeight: previous.height - expectedOffset, informativeTiles: 0, agreeingTiles: 0,
     agreementRatio: 0, bestScore: 0, secondBestScore: 0, confidence: 0 };
   if (width !== current.width) return { ...base, result: 'failed' };
@@ -32,6 +34,7 @@ export function matchVertical(previous, current, expectedOffset, fast = false) {
     const deviation = Math.sqrt(Math.max(0, squares / count - (sum / count) ** 2));
     if (!Number.isFinite(deviation) || deviation < VISUAL.minDeviation || verticalEnergy / count < 0.05) continue;
     base.informativeTiles++;
+    informative.push(tile);
     const candidates = [];
     for (let offset = low; offset <= high; offset++) {
       let error = 0;
@@ -60,7 +63,7 @@ export function matchVertical(previous, current, expectedOffset, fast = false) {
     // Near-exact matches may distinguish adjacent smooth rows by a smaller
     // absolute margin; noisy near-ties still require the full 0.018 margin.
     if (quality && second.error - best.error >= Math.min(VISUAL.margin, Math.max(VISUAL.exactMargin, best.error * 0.5))) {
-      votes.push({ ...best, second: second.error });
+      votes.push({ tile, ...best, second: second.error });
     }
   }
   if (base.informativeTiles < VISUAL.minTiles) return { ...base, result: 'low-information' };
@@ -80,5 +83,16 @@ export function matchVertical(previous, current, expectedOffset, fast = false) {
   base.matchedOffset = agreeing[0].offset;
   base.correction = base.matchedOffset - expectedOffset;
   base.confidence = base.agreementRatio * Math.max(0, base.bestScore);
+  if (policy === 'strict') {
+    base.zones = {};
+    for (const [name, left, right] of [['left', 0, 3], ['center', 3, 9], ['right', 9, 12]]) {
+      const informativeTiles = informative.filter(tile => tile >= left && tile < right).length;
+      const agreeingTiles = agreeing.filter(vote => vote.tile >= left && vote.tile < right).length;
+      const agreementRatio = informativeTiles ? agreeingTiles / informativeTiles : null;
+      base.zones[name] = { informativeTiles, agreeingTiles, agreementRatio,
+        pass: !informativeTiles || agreementRatio >= 2 / 3 };
+    }
+    if (Object.values(base.zones).some(zone => !zone.pass)) return { ...base, result: 'strict-coverage-failed' };
+  }
   return { ...base, result: 'matched' };
 }

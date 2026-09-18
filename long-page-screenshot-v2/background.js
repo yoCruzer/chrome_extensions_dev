@@ -66,7 +66,7 @@ async function finish(s, error) {
   }
   lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
     metrics: { ...s.metrics, totalMs: Date.now() - s.started },
-    ...(s.mode === "full" ? { attempt: s.attempt || 1, reasonCode: error?.reasonCode, diagnostics: { ...s.full, fullProof: s.fullProofDiagnostics ? { ...s.fullProofDiagnostics, trigger: error?.fullProofTrigger || s.fullProofDiagnostics.trigger } : null, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
+    ...(s.mode === "full" ? { attempt: s.attempt || 1, reasonCode: error?.reasonCode, diagnostics: { ...s.full, continuityPolicy: s.continuityPolicy, fullProof: s.fullProofDiagnostics ? { ...s.fullProofDiagnostics, trigger: error?.fullProofTrigger || s.fullProofDiagnostics.trigger } : null, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
     ...(s.mode === "region" ? { reasonCode: error ? error.reasonCode || "CAPTURE_FAILED" : undefined,
       attempt: s.attempt || 1, diagnostics: { ...s.diagnostics, ...error?.diagnostics } } : {}),
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
@@ -76,13 +76,14 @@ async function finish(s, error) {
   finally { if (active === s) active = null; }
 }
 
-async function start(mode, output = "auto") {
+async function start(mode, output = "auto", continuityPolicy = "robust") {
   if (!["auto", "css", "75", "50", "device"].includes(output)) throw new Error("未知输出尺寸。");
   if (!["full", "region"].includes(mode)) throw new Error("未知截图模式。");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^(https?|file):\/\//.test(tab.url || "")) throw new Error("请在普通网页中使用；浏览器内部页面不支持截图。");
   if (active) throw new Error("已有截图任务，请先取消或等待完成。");
   const s = { id: crypto.randomUUID(), tab, mode, output, metrics: { captures: 0, settles: 0, encodeMs: 0, saveMs: 0, retries: 0, frameRetries: 0 }, started: Date.now(), frames: 0, parts: 0, cancelled: false };
+  if (mode === "full") s.continuityPolicy = continuityPolicy === "strict" ? "strict" : "robust";
   active = s;
   try {
     await status(s, "preparing", "正在准备页面…");
@@ -279,6 +280,8 @@ function recordVisual(s, match, retry) {
   if (!match) return;
   const d = s.full.visual;
   d.visualChecks++;
+  if (match.zones) d.strictCoverageChecks++;
+  if (match.result === "strict-coverage-failed") d.strictCoverageFailures++;
   if (retry) d.visualRecoveryRetries++;
   if (match.result === 'matched') {
     if (match.path === 'fast' && !retry) d.visualFastPath++;
@@ -292,7 +295,7 @@ function recordVisual(s, match, retry) {
 }
 
 async function captureFull(s, view, dataUrl) {
-  s.full.visual ||= { visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
+  s.full.visual ||= { continuityPolicy: s.continuityPolicy, strictCoverageChecks: 0, strictCoverageFailures: 0, visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
     visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
@@ -318,7 +321,7 @@ async function captureFull(s, view, dataUrl) {
           firstColumn: x === 0, canonicalY: band?.canonicalY, novelTop: band?.novelTop });
         dataUrl = null;
         recordVisual(s, result.visual, retry);
-        if (!result.accepted && x === 0) {
+        if (!result.accepted && x === 0 && s.continuityPolicy !== "strict") {
           const d = s.full.visual;
           d.bottomTailChecks++;
           d.bottomTailRejected++;
@@ -354,7 +357,7 @@ async function captureFull(s, view, dataUrl) {
         if (!result.accepted) {
           if (retry < 2) continue;
           s.full.visual.visualFailures++;
-          throw Object.assign(new Error("无法可靠对齐相邻截图，请等待页面稳定后重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
+          throw Object.assign(new Error(s.continuityPolicy === "strict" ? "全宽严格模式下无法确认部分区域连续。可等待页面稳定后重试，或改用“智能容错”。" : "无法可靠对齐相邻截图，请等待页面稳定后重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
         }
         s.visualEvidence = evidence;
         s.visualHeight = view.height;
@@ -468,7 +471,7 @@ async function run(s) {
         const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
         if (contexts.length) await chrome.offscreen.closeDocument();
         await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch frames into one bounded PNG." });
-        const scale = await request(s, "offscreen", "OPEN", { region: s.region, view: relativeView(s, view), dataUrl, output: s.output });
+        const scale = await request(s, "offscreen", "OPEN", { region: s.region, view: relativeView(s, view), dataUrl, output: s.output, ...(s.mode === "full" ? { continuityPolicy: s.continuityPolicy } : {}) });
         s.outputSize = scale;
         await request(s, "offscreen", "PART", { start: 0, height: scale.height });
         if (s.mode === "full") {
@@ -535,7 +538,7 @@ chrome.runtime.onMessage.addListener((m, sender, respond) => {
     await ready;
     const fromPopup = sender.url === chrome.runtime.getURL("popup.html");
     if (m.type === "STATUS") return lastStatus;
-    if (m.type === "START" && fromPopup) return start(m.mode, m.output);
+    if (m.type === "START" && fromPopup) return start(m.mode, m.output, m.continuityPolicy);
     if (m.type === "SHOW") {
       if (m.id !== lastStatus.id || !lastStatus.result || (!fromPopup && (sender.tab?.id !== lastStatus.tabId || sender.frameId !== 0))) throw new Error("过期的截图结果。");
       await chrome.downloads.show(lastStatus.result.downloadId);

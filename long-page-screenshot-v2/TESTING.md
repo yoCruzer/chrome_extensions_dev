@@ -274,3 +274,19 @@ output/UI 首轮在 CSS 模式点击「显示文件」后立即读取 worker，�
 没有修改 `capture/visual.js`、`content.js`、manifest、V0.1 或其它 extension；没有权限、依赖、站点 selector、临时 PNG／profile／log 入库。限制仍为一维多数 tile 注册；GitHub 少数动态 sidebar／toolbar 的局部 seam artifact 仅记录，不做 per-tile／seam carving／语义识别。底部稳定是有界观测；虚拟列表、无限 feed、iframe inner scroll、任意二维变形等仍不支持。本轮证据来自确定性本地 Chrome fixture，不声称重新验证真实登录态 GitHub／CSDN。
 
 output/UI 定向补验退出码 **0**：Auto／CSS／75／50／device 的完整像素、路径／show、面板取消／关闭、26000px Auto 缩至 16384px、单 PNG／底部完整、固定尺寸和极限预检拒绝全部通过。最终 **Node 76/76 + 14 个 Chrome 分组通过**；只运行一轮完整矩阵及上述 output/UI 单组补验。
+
+
+## Robust / Strict policy targeted validation — 2026-09-18
+
+基线 `b5404f4accb977e57f5bbd00ec37918fce17fc6b`，只修改 V2；未访问真实外网站点。
+
+- `node --test tests/visual.test.mjs`：18/18，通过原 Robust matcher 场景、同输入左侧冲突 Robust 接受／Strict 拒绝、Strict 全宽 −45px correction、空白 left neutral（fast/recovery）。
+- `node --test tests/bottom-tail.test.mjs`：16/16，验证 Robust tail 映射及原 fallback、Strict 对 failed/ambiguous/low-information/strict-coverage-failed 全部禁止 bottom anchor，正常视觉通过仍接受。
+- `node --test --test-name-pattern='START validates' tests/background.test.mjs`：1/1，strict/robust/非法或缺失值默认 Robust，Region 不保留 policy。
+- `POLICY_ONLY=1 node tests/browser.mjs`：退出码 0。Robust dynamic-left 成功且稳定主体逐行一致；同页 Strict 两次 bounded retries 后 `VISUAL_CONTINUITY_FAILED`、无 PNG；Strict clean full-width +45px 位移成功，输出全宽逐行一致。检查 offscreen 清理、滚动恢复、policy diagnostics。
+- 同一 policy 组包含实际 popup document reopen：首次 Robust/unremembered，Strict 保存及恢复，取消记忆删除 entry，再次默认 Robust；storage 写入失败轻量提示且 START 仍发送 Strict。
+- 同一组只跑一个 basic Region smoke：START 传入 Strict，500×1600 输出逐行比较，Region diagnostics 无 policy。
+
+浏览器使用已安装 Chrome、隔离临时 profile 和本地 HTTP fixture；日志 `/tmp/policy-target.log`，PNG/profile 位于系统临时目录，未入库。首次环境启动因 sandbox localhost 限制及缺少 Playwright bundled Chromium 未执行测试，随后改用已安装 Chrome 完成以上定向验证。
+
+Due to execution/token budget, full regression matrix was intentionally NOT run.
