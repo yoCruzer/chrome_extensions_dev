@@ -304,6 +304,9 @@ function recordVisual(s, match, retry) {
   d.visualChecks++;
   if (match.zones) d.strictCoverageChecks++;
   if (match.result === "strict-coverage-failed") d.strictCoverageFailures++;
+  if (match.continuity === "probable") d.probablePlacements++;
+  if (match.fallbackMethod === "geometry") d.geometryFallbacks++;
+  if (match.fallbackMethod === "probable-visual") d.probableVisualCorrections++;
   if (retry) d.visualRecoveryRetries++;
   if (match.result === 'matched') {
     if (match.path === 'fast' && !retry) d.visualFastPath++;
@@ -319,6 +322,7 @@ function recordVisual(s, match, retry) {
 async function captureFull(s, view, dataUrl) {
   s.full.visual ||= { continuityPolicy: s.continuityPolicy, strictCoverageChecks: 0, strictCoverageFailures: 0, visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
     visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
+    probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
   while (true) {
@@ -342,6 +346,7 @@ async function captureFull(s, view, dataUrl) {
         const evidence = (counters?.witnessMoved || 0) + (counters?.witnessResized || 0) + (counters?.witnessRemoved || 0);
         let result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
           uncertain: retry > 0 || evidence !== (s.visualEvidence || 0) || view.height !== s.visualHeight,
+          allowRobustFallback: retry === 2 && s.continuityPolicy !== "strict",
           firstColumn: x === 0, canonicalY: band?.canonicalY, novelTop: band?.novelTop });
         dataUrl = null;
         recordVisual(s, result.visual, retry);

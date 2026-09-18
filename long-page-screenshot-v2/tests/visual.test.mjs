@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchVertical } from '../capture/visual.js';
+import { matchVertical, robustPlacement } from '../capture/visual.js';
 function frame(offset, mutate = () => null, pattern = (x, y) => ((Math.imul(y + 17, 7321) ^ Math.imul(x + 19, y + 731)) >>> 0) % 251) {
   const width = 120, height = 700;
   return { width, height, start: 0, data: Float32Array.from({ length: width * height }, (_, i) => {
@@ -62,4 +62,42 @@ test('strict full-width correction and blank neutral zone',()=>{
   assert.ok(Object.values(result.zones).every(zone=>zone.pass));
   if(blank){assert.equal(result.zones.left.informativeTiles,0);assert.equal(result.zones.left.agreementRatio,null)}
  }
+});
+
+test('Robust probable visual placement keeps a bounded minority correction without pretending it was verified', () => {
+  const pattern=(x,y)=>x<30
+    ? ((Math.imul(y+17,7321)^Math.imul(x+19,y+731))>>>0)%251
+    : (y%20)*10+x;
+  const visual=matchVertical(frame(0,undefined,pattern),frame(480,undefined,pattern),525,false,'robust');
+  assert.equal(visual.result,'ambiguous');
+  assert.equal(visual.agreeingTiles,3);
+  assert.equal(visual.candidateOffset,480);
+  const placement=robustPlacement({canonicalY:1000,end:1700},525,visual,'robust');
+  assert.equal(placement.visual.continuity,'probable');
+  assert.equal(placement.visual.fallbackMethod,'probable-visual');
+  assert.equal(placement.visual.placementCorrection,-45);
+  assert.equal(placement.canonicalY,1480);
+  assert.equal(placement.novelTop,1700);
+});
+
+test('Robust geometry fallback is limited to non-contradictory ambiguity/low-information; Strict and failed evidence stay closed', () => {
+  const repeated=matchVertical(
+    frame(0,undefined,(x,y)=>(y%20)*10+x),
+    frame(525,undefined,(x,y)=>(y%20)*10+x),525,false,'robust');
+  assert.equal(repeated.result,'ambiguous');
+  const geometry=robustPlacement({canonicalY:1000,end:1700},525,repeated,'robust');
+  assert.equal(geometry.visual.fallbackMethod,'geometry');
+  assert.equal(geometry.visual.placementOffset,525);
+  assert.equal(geometry.visual.continuity,'probable');
+
+  const blank=frame(0,()=>255);
+  const low=matchVertical(blank,blank,525,false,'robust');
+  assert.equal(low.result,'low-information');
+  assert.equal(robustPlacement({canonicalY:0,end:700},525,low,'robust').visual.fallbackMethod,'geometry');
+
+  const failed=matchVertical(frame(0),frame(1800),525,false,'robust');
+  assert.equal(robustPlacement({canonicalY:0,end:700},525,failed,'robust'),null);
+  assert.equal(robustPlacement({canonicalY:0,end:700},525,repeated,'strict'),null);
+  assert.equal(robustPlacement({canonicalY:0,end:700},0,repeated,'robust'),null);
+  assert.equal(robustPlacement({canonicalY:0,end:700},700,repeated,'robust'),null);
 });

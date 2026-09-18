@@ -34,7 +34,7 @@
 
 - 普通页面单遍处理：滚到当前块，等待几何和可见图片稳定，立即截图并绘制，再前往下一块；不再无条件完整预滚动一遍。
 - 整页每块至少约 480 ms、区域约 240 ms 稳定等待；区域等待比较局部几何，不等待整个 document 静止。可见图片或局部几何在 5 秒内仍不稳定就有界重试／失败。截图调用间隔至少 550 ms，遵守 Chrome 限流。
-- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除要求视觉验证，不再触发整页重启。普通中间帧匹配失败最多重采两次，再以 `VISUAL_CONTINUITY_FAILED` 停止且不下载 PNG。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
+- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除作为证据，不直接触发整页重启。Robust 在两次有界 recovery 后若仍只是 `ambiguous`／`low-information`，可显式以 `probable` placement 完成：有 ≥3 个高质量 tile 同意同一候选时优先保留该 visual correction，否则使用经过前后截图验证的 observed scroll geometry；`failed`／强矛盾仍停止。Strict 不使用该 fallback。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
 - 支持横向及纵向拼接，以实际可见坐标裁剪、按绝对输出边界取整，避免累计接缝误差。
 - 页面状态面板使用 Shadow DOM。截图前隐藏，并等待两次动画帧重绘；截图后恢复，面板不进入最终 PNG。
 - 通常仅保留当前帧和一个有界画布；动态扩展时短暂保留新旧两个画布，拷贝后立即释放旧画布。Auto 扩展超出原比例预算时会下采样已有像素；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
@@ -152,3 +152,24 @@ Canonical 映射为 `canonicalY = finalExtent - viewportHeight`、`novelTop = ca
 `diagnostics.visual` 新增 `bottomTailChecks`、`bottomTailAccepted`、`bottomTailRejected`；一次检查未使用 anchor（包括新截图已视觉匹配）计入 rejected。接受时 trace 记录 `event=bottom-tail-anchored`、`result=BOTTOM_ANCHORED_TAIL`、原 `visualResult`、finalExtent、canonicalEndBefore、remainingTail、actualTargetScrollY、maxTargetScrollY、viewportHeight 和 novelPixels。正常视觉成功不标记 fallback，任务仍以正常成功结束；原复制诊断入口保留。
 
 GitHub 多数 tiles 确定的一维全局对齐可能让少数动态 sidebar／toolbar 留下局部 seam artifact。Robust 保留底部小尾段策略；Strict 可拒绝此类局部冲突，但不增加 per-tile 坐标、seam carving 或语义侧栏识别。底部稳定仍是有界时间观测，不保证未来不再加载；不追溯改写已提交前缀，也不保证任意动态内容的最终时刻快照。Region runtime 和 CaptureTarget detection 未改变。
+
+## Completion-First Reset — Phase 1（Robust probable placement）
+
+开发分支：`feature/completion-first-reset`，基线 `5c86a5962676caadbfc78819e7742c25984afc33`。
+
+本阶段只改变 Full Page Robust 的最终 admission policy，不修改 Region、Strict、Warm-up、Multi-part、权限或 manifest。
+
+流程仍然是 visual-first：
+
+1. normal matcher；
+2. 同位置重采；
+3. 增大共享上下文的最终 recovery；
+4. 最终结果若为 `matched`，沿用原 visual canonical placement；
+5. 最终仍为 `ambiguous` 时：
+   - 若至少 `VISUAL.minTiles` 个高质量 tiles 对同一 candidate offset 达成一致，记录 `continuity=probable / fallbackMethod=probable-visual` 并使用该 bounded correction；
+   - 否则 Robust 使用 observed geometry，记录 `fallbackMethod=geometry`；
+6. `low-information` 在 observed geometry coherent 时可走 geometry probable；
+7. `failed`、真实 gap、target/environment/viewport/zoom 变化仍 fail closed；
+8. Strict 完全保持 verified-only，不接受 Robust fallback。
+
+Diagnostics 新增 `probablePlacements`、`geometryFallbacks`、`probableVisualCorrections`；trace 保留原 visual result，同时记录 `continuity`、`fallbackMethod`、`placementOffset`、`placementCorrection`，避免把 fallback 冒充成 verified match。

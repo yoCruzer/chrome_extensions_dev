@@ -5,12 +5,47 @@ export const VISUAL = Object.freeze({ tiles: 12, maxWidth: 384, sampleX: 4,
   minDeviation: 5, maxError: 0.04, maxAbsoluteError: 0.5, margin: 0.018, exactMargin: 0.005 });
 export const overlapCSS = height => Math.min(height - 32, Math.max(160, Math.min(320, height * 0.25)));
 
+
+// Robust completion-first placement after normal matching + bounded recovery.
+// This never upgrades uncertainty to "matched": it returns an explicit probable
+// placement only for ambiguity / low-information with coherent positive geometry.
+// Strong mismatch ("failed") and Strict policy remain fail-closed.
+export function robustPlacement(previous, expectedOffset, visual, policy = 'robust') {
+  if (policy !== 'robust' || !visual || !['ambiguous', 'low-information'].includes(visual.result)) return null;
+  const previousVisibleHeight = previous?.end - previous?.canonicalY;
+  if (!Number.isFinite(expectedOffset) || expectedOffset <= 0 ||
+      !Number.isFinite(previousVisibleHeight) || previousVisibleHeight <= 0 ||
+      expectedOffset >= previousVisibleHeight) return null;
+
+  let placementOffset = expectedOffset, fallbackMethod = 'geometry';
+  if (visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
+      Number.isFinite(visual.candidateOffset)) {
+    placementOffset = visual.candidateOffset;
+    fallbackMethod = 'probable-visual';
+  }
+  if (!Number.isFinite(placementOffset) || placementOffset <= 0 || placementOffset >= previousVisibleHeight) return null;
+
+  return {
+    canonicalY: previous.canonicalY + placementOffset,
+    novelTop: previous.end,
+    visual: {
+      ...visual,
+      continuity: 'probable',
+      fallbackMethod,
+      placementOffset,
+      placementCorrection: placementOffset - expectedOffset,
+      path: fallbackMethod === 'probable-visual' ? 'probable-visual' : 'geometry-fallback'
+    }
+  };
+}
+
 // Frames contain only bounded top/tail strips, never complete screenshot history.
 export function matchVertical(previous, current, expectedOffset, fast = false, policy = 'robust') {
   const radius = VISUAL.radius, width = previous.width;
   policy = policy === 'strict' ? 'strict' : 'robust';
   const informative = [];
-  const base = { policy, expectedOffset, matchedOffset: null, correction: null, searchRadius: radius,
+  const base = { policy, expectedOffset, matchedOffset: null, correction: null,
+    candidateOffset: null, candidateCorrection: null, searchRadius: radius,
     overlapHeight: previous.height - expectedOffset, informativeTiles: 0, agreeingTiles: 0,
     agreementRatio: 0, bestScore: 0, secondBestScore: 0, confidence: 0 };
   if (width !== current.width) return { ...base, result: 'failed' };
@@ -74,6 +109,10 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
   }
   base.agreeingTiles = agreeing.length;
   base.agreementRatio = agreeing.length / base.informativeTiles;
+  if (agreeing.length) {
+    base.candidateOffset = agreeing[0].offset;
+    base.candidateCorrection = base.candidateOffset - expectedOffset;
+  }
   const summary = agreeing.length ? agreeing : scores;
   if (summary.length) {
     base.bestScore = 1 / (1 + summary.reduce((sum, vote) => sum + vote.error, 0) / summary.length);

@@ -21,11 +21,9 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
   await capture('full','css');
   const result=await waitFor(s=>!s.busy),v=result.diagnostics.visual;
   assert.equal(v.bottomTailAccepted,0,`${kind} must remain visual-only`);
-  if(['unrelated','ambiguous','low'].includes(kind)) {
+  if(kind==='unrelated') {
    assert.equal(result.state,'failed',JSON.stringify(result));assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');
    assert.equal(result.parts,0);assert.equal(result.result,undefined);assert.equal(v.visualRecoveryRetries,2);assert.equal(v.visualFailures,1);
-   if(kind==='low')assert.ok(v.lowInformationRejects>0);
-   if(kind==='ambiguous')assert.ok(v.ambiguousMatches>0);
   } else {
    assert.equal(result.state,'complete',JSON.stringify(result));assert.equal(result.attempt,1);assert.equal(result.parts,1);
    const png=PNG.sync.read(await readFile(result.result.filename));assert.equal(png.width,900);assert.equal(png.height,3200);
@@ -36,6 +34,13 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
    if(['github','github-recovery','github-recovery-small','global'].includes(kind))assert.ok(v.trace.some(t=>t.correction===-(kind.startsWith('github')?45:80)),JSON.stringify(v));
    else assert.ok(v.trace.filter(t=>t.result==='matched').every(t=>t.correction===0));
    if(kind==='transient'){assert.equal(v.visualRecoveryRetries,1);assert.equal(v.visualFailures,0)}
+   if(['ambiguous','low'].includes(kind)){
+    assert.ok(v.probablePlacements>0,JSON.stringify(v));assert.ok(v.geometryFallbacks>0,JSON.stringify(v));
+    assert.equal(v.visualFailures,0);
+    if(kind==='low')assert.ok(v.lowInformationRejects>0);
+    if(kind==='ambiguous')assert.ok(v.ambiguousMatches>0);
+    assert.ok(v.trace.some(t=>t.continuity==='probable'&&t.fallbackMethod==='geometry'),JSON.stringify(v));
+   }
    if(['github','github-recovery','github-recovery-small','sidebar'].includes(kind))assert.ok(result.diagnostics.fullProof.trace.some(t=>t.trigger==='WITNESS_MOVED'&&Math.abs(t.delta.dy-(kind.startsWith('github')?45:20.617))<0.1));
   }
   assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);

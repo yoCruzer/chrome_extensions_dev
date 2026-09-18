@@ -290,3 +290,19 @@ output/UI 定向补验退出码 **0**：Auto／CSS／75／50／device 的完整�
 浏览器使用已安装 Chrome、隔离临时 profile 和本地 HTTP fixture；日志 `/tmp/policy-target.log`，PNG/profile 位于系统临时目录，未入库。首次环境启动因 sandbox localhost 限制及缺少 Playwright bundled Chromium 未执行测试，随后改用已安装 Chrome 完成以上定向验证。
 
 Due to execution/token budget, full regression matrix was intentionally NOT run.
+
+## Completion-First Reset Phase 1 targeted plan — 2026-09-18
+
+基线：`5c86a5962676caadbfc78819e7742c25984afc33`。分支：`feature/completion-first-reset`。
+
+本阶段只验证 Robust probable placement：
+
+- matcher 单元：低于多数门槛但 ≥3 个高质量 tiles 支持同一 −45px correction → `ambiguous` + candidate，Robust 使用 `probable-visual`；
+- repeated rows 无唯一 visual candidate → Robust 使用 observed geometry；
+- low-information → Robust geometry probable；
+- unrelated / strong mismatch (`failed`) → 无 fallback；
+- Strict 对相同 ambiguity → 无 fallback；
+- real-Chrome visual fixture：`ambiguous` / `low` 从旧的无 PNG 改为完整输出并记录 probable；`unrelated` 仍 `VISUAL_CONTINUITY_FAILED`。
+- 不修改 Region，现有 policy/Region targeted smoke 应保持原语义。
+
+本阶段不要求完整回归；先跑 `visual.test.mjs`、`VISUAL_ONLY` 及必要的 policy smoke。真实 GitHub/CSDN 仍由用户在分支版本上验收。

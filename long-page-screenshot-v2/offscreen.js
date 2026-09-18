@@ -1,5 +1,5 @@
 import { outputGeometry, drawGeometry } from "./capture/geometry.js";
-import { VISUAL, overlapCSS, matchVertical } from "./capture/visual.js";
+import { VISUAL, overlapCSS, matchVertical, robustPlacement } from "./capture/visual.js";
 import { bottomTail } from "./capture/bottom-tail.js";
 
 let session;
@@ -113,7 +113,7 @@ async function handle(m) {
     const bitmap = await decode(m.dataUrl);
     try {
       if (bitmap.width !== session.bitmapWidth || bitmap.height !== session.bitmapHeight) throw new Error("截图尺寸已变化，请保持窗口和缩放不变。");
-      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual, anchored;
+      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual, anchored, fallback;
       if (m.firstColumn && session.previous) {
         const expected = m.view.y - session.previous.documentY;
         const current = strip(bitmap, m.view, false, session.previous.strip.start - Math.max(1, expected - VISUAL.radius));
@@ -123,10 +123,19 @@ async function handle(m) {
         } else visual.path = 'fast';
         if (visual.result !== 'matched') {
           anchored = session.continuityPolicy !== "strict" && m.bottomExtent !== undefined && bottomTail(m.view, session.previous.end, m.bottomExtent);
-          if (!anchored) return { accepted: false, visual, canonicalEnd: session.previous.end };
+          fallback = !anchored && m.allowRobustFallback
+            ? robustPlacement(session.previous, expected, visual, session.continuityPolicy)
+            : null;
+          if (!anchored && !fallback) return { accepted: false, visual, canonicalEnd: session.previous.end };
         }
-        canonicalY = anchored ? anchored.canonicalY : session.previous.canonicalY + visual.matchedOffset;
-        novelTop = session.previous.end;
+        if (fallback) {
+          canonicalY = fallback.canonicalY;
+          novelTop = fallback.novelTop;
+          visual = fallback.visual;
+        } else {
+          canonicalY = anchored ? anchored.canonicalY : session.previous.canonicalY + visual.matchedOffset;
+          novelTop = session.previous.end;
+        }
       }
       const localBottom = Math.min(m.view.clientHeight, m.view.height - m.view.y);
       const end = canonicalY + localBottom;
