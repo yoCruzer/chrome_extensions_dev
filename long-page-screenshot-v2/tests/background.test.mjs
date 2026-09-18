@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { regionFromEdges, outputGeometry, sameViewport } from "../capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "../capture/planner.js";
 import { bottomTail } from "../capture/bottom-tail.js";
-import { overlapCSS } from "../capture/visual.js";
+import { VISUAL, overlapCSS } from "../capture/visual.js";
 const source = (await readFile(new URL("../background.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
 test("startup close failure does not poison ready; new job completes and reveals actual download", async () => {
@@ -30,7 +30,7 @@ test("startup close failure does not poison ready; new job completes and reveals
     downloads: { download: async options => { assert.doesNotMatch(options.filename, /part-/); return 8; },
       search: async () => [{ id: 8, state: "complete", filename: "/custom/chosen/result.png", fileSize: 42 }], cancel: async () => {}, show: async id => { shown = id; } }
   };
-  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, overlapCSS, bottomTail, setTimeout, setInterval, clearInterval });
+  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, VISUAL, overlapCSS, bottomTail, setTimeout, setInterval, clearInterval });
   const send = m => new Promise(resolve => listener({ target: "background", ...m }, { id: "test", url: "extension://popup.html" }, resolve));
   assert.equal((await send({ type: "STATUS" })).ok, true);
   assert.equal((await send({ type: "START", mode: "full" })).ok, true);
@@ -84,12 +84,35 @@ test('rigid translation maps actual scroll coverage into the original canvas coo
   assert.equal(tile.y - normalized.y, (tile.y + 180) - actual.y);
 });
 
+test('Full Page absorbs advisory pending-witness FRAME_MOVED and maximizes retained recovery context', async () => {
+  const helperSource = source.slice(source.indexOf('function recoveryBacktrackCSS'), source.indexOf('async function capture(s, view)'));
+  let calls = 0;
+  const context = {
+    VISUAL,
+    scroll: async () => {
+      calls++;
+      if (calls === 1) throw Object.assign(new Error('pending witness moved'), { translation: true, reasonCode: 'FRAME_MOVED' });
+      return { x: 0, y: 100 };
+    }
+  };
+  vm.runInNewContext(helperSource, context);
+  const s = { metrics: { frameRetries: 0 } };
+  assert.equal((await context.scrollFullRecoverable(s, 0, 100)).y, 100);
+  assert.equal(calls, 2);
+  assert.equal(s.metrics.frameRetries, 1);
+  assert.equal(context.recoveryBacktrackCSS(768), 256);
+  assert.equal(768 - overlapCSS(768) - context.recoveryBacktrackCSS(768), 320);
+  context.scroll = async () => { throw Object.assign(new Error('still moving'), { translation: true, reasonCode: 'FRAME_MOVED' }); };
+  await assert.rejects(() => context.scrollFullRecoverable({ metrics: { frameRetries: 0 } }, 0, 100),
+    error => error.reasonCode === 'FRAME_MOVED' && error.translation);
+});
+
 test('horizontal columns use the successfully repositioned visual band after recovery', async () => {
   const moves = [], frames = [];
   const view = { x: 0, y: 0, width: 1600, height: 1000, clientWidth: 800, clientHeight: 600 };
   const s = { full: { end: 1000 }, region: { width: 1600 }, metrics: { captures: 1 }, frames: 0 };
   let rejects = 0;
-  const context = { overlapCSS, bottomTail, MAX_STEPS, bottomQuiescence: async () => true,
+  const context = { VISUAL, overlapCSS, bottomTail, MAX_STEPS, bottomQuiescence: async () => true,
     scroll: async (s, x, y) => { const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current; },
     extendEnd: async () => {}, capture: async (s, view) => { s.metrics.captures++; return { view, dataUrl: 'data:' }; },
     status: async () => {}, request: async (s, target, type, m) => {
@@ -104,9 +127,9 @@ test('horizontal columns use the successfully repositioned visual band after rec
   vm.runInNewContext(source.slice(source.indexOf('function recordVisual'), source.indexOf('async function saveImage')), context);
   await context.captureFull(s, view, 'data:');
   assert.equal(rejects, 2);
-  const recovered = frames.findIndex(m => m.firstColumn && m.view.y === 280);
+  const recovered = frames.findIndex(m => m.firstColumn && m.view.y === 184);
   assert.ok(recovered > 0);
-  assert.equal(frames[recovered + 1].view.y, 280);
+  assert.equal(frames[recovered + 1].view.y, 184);
   assert.equal(frames[recovered + 1].x, 800);
   assert.equal(s.full.visual.visualFailures, 0);
 });

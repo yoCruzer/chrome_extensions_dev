@@ -1,6 +1,6 @@
 import { regionFromEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "./capture/planner.js";
-import { overlapCSS } from "./capture/visual.js";
+import { VISUAL, overlapCSS } from "./capture/visual.js";
 import { bottomTail } from "./capture/bottom-tail.js";
 
 let active = null;
@@ -179,6 +179,26 @@ async function scroll(s, x, y) {
   return view;
 }
 
+function recoveryBacktrackCSS(height) {
+  // The retained previous strip contains normal overlap plus the matcher search
+  // margins/rows. On the final retry, use that already-retained context instead
+  // of lowering matching thresholds or allocating more history.
+  return Math.min(Math.max(0, height - 32), 2 * VISUAL.radius + VISUAL.rows);
+}
+
+async function scrollFullRecoverable(s, x, y) {
+  for (let sample = 0; sample < 3; sample++) {
+    try { return await scroll(s, x, y); }
+    catch (error) {
+      // Full Page pending witnesses are advisory. content.js clears the stale
+      // pending baseline before reporting FRAME_MOVED; repeat the uncommitted
+      // scroll checkpoint and let visual continuity judge the captured pixels.
+      if (!error.translation || error.reasonCode !== "FRAME_MOVED" || sample === 2) throw error;
+      s.metrics.frameRetries++;
+    }
+  }
+}
+
 async function capture(s, view) {
   const target = s.scrollTarget;
   for (let sample = 0; sample < 3; sample++) {
@@ -187,7 +207,9 @@ async function capture(s, view) {
       if (!error.translation || sample === 2) throw error;
       // Only this uncommitted frame moved; keep already verified canvas pixels.
       s.metrics.frameRetries++;
-      view = await scroll(s, target.x, target.y);
+      view = s.mode === "full"
+        ? await scrollFullRecoverable(s, target.x, target.y)
+        : await scroll(s, target.x, target.y);
       if (s.mode === "full" && !s.frames) {
         s.region = { x: 0, y: 0, width: view.width, height: view.height };
         s.full.end = view.height;
@@ -306,10 +328,12 @@ async function captureFull(s, view, dataUrl) {
       for (let retry = 0; retry < 3; retry++) {
         if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
         if (!dataUrl) {
-          // Retry twice: settle at the same position, then back up by one bounded
-          // overlap to provide more shared pixels. Never restart the whole image.
-          const y = band?.documentY ?? (retry === 2 ? Math.max(0, nextY - overlapCSS(view.clientHeight)) : nextY);
-          view = await scroll(s, x, y);
+          // Retry once at the same position for transient paint. The final
+          // retry backs up by the extra rows already retained by the matcher,
+          // maximizing shared context without increasing memory or relaxing
+          // any visual-confidence threshold.
+          const y = band?.documentY ?? (retry === 2 ? Math.max(0, nextY - recoveryBacktrackCSS(view.clientHeight)) : nextY);
+          view = await scrollFullRecoverable(s, x, y);
           await extendEnd(s, view);
           ({ view, dataUrl } = await capture(s, view));
         }
@@ -331,7 +355,7 @@ async function captureFull(s, view, dataUrl) {
             // visual registration win before authorizing the terminal anchor.
             const stableExtent = s.full.end;
             if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
-            view = await scroll(s, x, view.y);
+            view = await scrollFullRecoverable(s, x, view.y);
             await extendEnd(s, view);
             ({ view, dataUrl } = await capture(s, view));
             const after = await request(s, "content", "BOTTOM").catch(error => {
@@ -357,7 +381,10 @@ async function captureFull(s, view, dataUrl) {
         if (!result.accepted) {
           if (retry < 2) continue;
           s.full.visual.visualFailures++;
-          throw Object.assign(new Error(s.continuityPolicy === "strict" ? "全宽严格模式下无法确认部分区域连续。可等待页面稳定后重试，或改用“智能容错”。" : "无法可靠对齐相邻截图，请等待页面稳定后重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
+          const strictCoverageFailed = s.continuityPolicy === "strict" && result.visual?.result === "strict-coverage-failed";
+          throw Object.assign(new Error(strictCoverageFailed
+            ? "全宽严格模式下无法确认部分区域连续。可等待页面稳定后重试，或改用“智能容错”。"
+            : "无法可靠对齐相邻截图，请等待页面稳定后重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
         }
         s.visualEvidence = evidence;
         s.visualHeight = view.height;
