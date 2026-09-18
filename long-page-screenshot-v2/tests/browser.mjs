@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { testBottomTail } from "./bottom-tail.mjs";
 import { testVisual } from "./visual.mjs";
 import { testFullNested } from "./full-nested.mjs";
 import { testProof } from "./proof.mjs";
@@ -30,6 +31,7 @@ const dynamicFixture = await readFile(resolve(extension, "tests/fixtures/test-dy
 const reliabilityFixture = process.env.RELIABILITY_ONLY ? await readFile(resolve(extension, `tests/fixtures/test-${process.env.RELIABILITY_ONLY}-like-page.html`), "utf8") : null;
 const nestedFixture = (process.env.NESTED_ONLY || process.env.FULL_NESTED_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-nested-page.html"), "utf8") : null;
 const adaptiveFixture = (process.env.ADAPTIVE_ONLY || process.env.DIAGNOSTICS_ONLY) ? await readFile(resolve(extension, "tests/fixtures/test-adaptive-page.html"), "utf8") : null;
+const bottomTailFixture = process.env.BOTTOM_TAIL_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-bottom-tail-page.html"), "utf8") : null;
 const visualFixture = process.env.VISUAL_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-visual-page.html"), "utf8") : null;
 const proofFixture = process.env.PROOF_ONLY ? await readFile(resolve(extension, "tests/fixtures/test-proof-page.html"), "utf8") : null;
 const server = createServer((req, res) => {
@@ -37,7 +39,7 @@ const server = createServer((req, res) => {
     res.setHeader('Content-Type','image/svg+xml');
     setTimeout(()=>res.end('<svg xmlns="http://www.w3.org/2000/svg" width="900" height="20"><rect width="900" height="20" fill="#e000e0"/></svg>'),600);
     return;
-  } res.setHeader("Content-Type", "text/html"); res.end(visualFixture || proofFixture || adaptiveFixture || nestedFixture || reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
+  } res.setHeader("Content-Type", "text/html"); res.end(bottomTailFixture || visualFixture || proofFixture || adaptiveFixture || nestedFixture || reliabilityFixture || (process.env.DYNAMIC_ONLY ? dynamicFixture : process.env.COMPLEX_ONLY ? complexFixture : fixture)); });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
   ...(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: "chromium" }),
@@ -96,7 +98,9 @@ try {
     assert.equal(selected.ok, expected, JSON.stringify(selected));
     return selected;
   };
-  if (process.env.VISUAL_ONLY) {
+  if (process.env.BOTTOM_TAIL_ONLY) {
+    await testBottomTail({ page, worker, waitFor, capture, PNG });
+  } else if (process.env.VISUAL_ONLY) {
     await testVisual({ page, worker, waitFor, capture, PNG });
   } else if (process.env.FULL_NESTED_ONLY) {
     await testFullNested({ page, worker, message, waitFor, capture, PNG, browserCDP });
@@ -134,7 +138,14 @@ try {
       if (output === "auto") await page.screenshot({ path: join(root, "completed-panel.png") });
       await worker.evaluate(() => { globalThis.shownDownload = null; chrome.downloads.show = id => { globalThis.shownDownload = id; }; });
       await panel.locator("#show").click();
-      assert.equal(await worker.evaluate(() => globalThis.shownDownload), result.result.downloadId);
+      // A completed click does not await its async extension message handler.
+      assert.equal(await worker.evaluate(async expected => {
+        const start = Date.now();
+        while (globalThis.shownDownload !== expected && Date.now() - start < 2000) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return globalThis.shownDownload;
+      }, result.result.downloadId), result.result.downloadId);
       console.log("PASS output/UI/path/show", output, png.width, png.height);
     }
     await capture("full");

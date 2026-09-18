@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8"><title>Terminal bottom tail</title>
+<style>html{overflow-anchor:none}body{margin:0}canvas{display:block}html.nested,html.nested body{height:100%;overflow:hidden}.nested #target{position:absolute;left:100px;top:40px;width:700px;height:912px;overflow:auto}</style>
+<div id="target"><canvas id="article"></canvas></div>
+<script>
+const kind=new URLSearchParams(location.search).get('kind')||'44';
+const nested=kind==='nested';if(nested)document.documentElement.className='nested';
+const target=document.querySelector('#target'),c=document.querySelector('canvas');
+let extent=kind==='1'?6385:kind==='upper'?6612:kind==='large'?6884:kind==='44'?6364:6428;
+function paint(height){
+ extent=height;c.width=nested?700:900;c.height=height;
+ const ctx=c.getContext('2d'),img=ctx.createImageData(c.width,c.height);
+ for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++){
+  const i=(y*c.width+x)*4;
+  const v=kind==='middle'&&y>=1100?((y%16)<8?40:220):y>=5900?245:((Math.imul(y+17,7321)^Math.imul(Math.floor(x/12)+19,y+731))>>>0)%251;
+  img.data[i]=v;img.data[i+1]=v;img.data[i+2]=v;img.data[i+3]=255;
+ }ctx.putImageData(img,0,0);
+ for(const [text,y] of [['TOP',30],['MIDDLE',3000],['BOTTOM',height-8]]){
+  ctx.fillStyle='#ff0080';ctx.font='20px monospace';ctx.fillText(text,300,y);
+ }
+ // The final row is independently recognizable, including the 1px case.
+ ctx.fillStyle='#20c070';ctx.fillRect(0,height-1,c.width,1);
+ window.reference=c.toDataURL().split(',')[1];
+}
+paint(extent);window.positions=[];
+(nested?target:window).addEventListener('scroll',()=>{
+ const y=nested?target.scrollTop:scrollY;positions.push({windowY:scrollY,targetY:y});
+ if(kind==='44'&&extent===6364&&y>=4500)paint(6428);
+ if(kind==='not-bottom'&&y>5472)scrollTo(0,5472);
+});
+if(nested)target.scrollTop=317;
+</script>

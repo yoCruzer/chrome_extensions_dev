@@ -1,6 +1,7 @@
 import { regionFromEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "./capture/planner.js";
 import { overlapCSS } from "./capture/visual.js";
+import { bottomTail } from "./capture/bottom-tail.js";
 
 let active = null;
 let lastStatus = { state: "idle", message: "准备就绪" };
@@ -201,9 +202,11 @@ async function captureOnce(s, view) {
   await ensureVisible(s);
   await request(s, "content", "HIDE_UI");
   try {
+    let fullBefore;
     if (s.mode === "full") {
       const before = await request(s, "content", "MEASURE", { watch: true });
       validateView(s, before);
+      fullBefore = before;
       if (before.x !== view.x || before.y !== view.y || before.viewportRect?.left !== view.viewportRect?.left || before.viewportRect?.top !== view.viewportRect?.top) {
         throw Object.assign(new Error("当前帧位置变化，正在重新采样。"), { translation: true });
       }
@@ -221,7 +224,10 @@ async function captureOnce(s, view) {
     await ensureVisible(s);
     const after = await request(s, "content", "MEASURE");
     validateView(s, after);
-    if (s.mode === "full") await extendEnd(s, after);
+    if (s.mode === "full") {
+      s.captureExtentStable = fullBefore.height === view.height && after.height === view.height;
+      await extendEnd(s, after);
+    }
     if (s.mode === "region" && (after.region.x !== view.region.x || after.region.y !== view.region.y || after.viewportRect?.left !== view.viewportRect?.left || after.viewportRect?.top !== view.viewportRect?.top)) {
       throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true });
     }
@@ -245,18 +251,24 @@ async function extendEnd(s, view) {
   if (s.offscreen) s.outputSize = await request(s, "offscreen", "EXTEND", { region: s.region });
 }
 
-async function bottomQuiescence(s) {
+async function bottomQuiescence(s, anchorView) {
   // Four stable 200ms observations; visible lazy images must also be ready.
   const started = Date.now();
   s.full.bottomStableSamples = 0;
   while (Date.now() - started < 3000) {
     await delay(200);
     await ensureVisible(s);
-    const view = await request(s, "content", "BOTTOM");
+    const view = await request(s, "content", "BOTTOM").catch(error => {
+      if (anchorView && error.translation) return null;
+      throw error;
+    });
+    if (!view) return false;
     validateView(s, view);
     const previous = s.full.end;
     await extendEnd(s, view);
     if (s.full.end > previous) return false;
+    if (anchorView && (view.height !== anchorView.height || view.y !== anchorView.y ||
+        Math.abs(view.y + view.clientHeight - view.height) > 0.01)) return false;
     s.full.bottomStableSamples = view.loading ? 0 : s.full.bottomStableSamples + 1;
     if (s.full.bottomStableSamples >= 4) return true;
   }
@@ -281,7 +293,8 @@ function recordVisual(s, match, retry) {
 
 async function captureFull(s, view, dataUrl) {
   s.full.visual ||= { visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
-    visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0, trace: [] };
+    visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
+    bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
   while (true) {
     if (documentBottom >= s.full.end - 0.01 && await bottomQuiescence(s)) break;
@@ -300,11 +313,44 @@ async function captureFull(s, view, dataUrl) {
         if (band && view.y !== band.documentY) throw Object.assign(new Error("横向截图时页面发生位移，请重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
         const counters = s.fullProofDiagnostics?.counters;
         const evidence = (counters?.witnessMoved || 0) + (counters?.witnessResized || 0) + (counters?.witnessRemoved || 0);
-        const result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
+        let result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
           uncertain: retry > 0 || evidence !== (s.visualEvidence || 0) || view.height !== s.visualHeight,
           firstColumn: x === 0, canonicalY: band?.canonicalY, novelTop: band?.novelTop });
         dataUrl = null;
         recordVisual(s, result.visual, retry);
+        if (!result.accepted && x === 0) {
+          const d = s.full.visual;
+          d.bottomTailChecks++;
+          d.bottomTailRejected++;
+          const anchor = bottomTail(view, result.canonicalEnd, s.full.end);
+          if (anchor && await bottomQuiescence(s, view)) {
+            // The rejected bitmap predates quiescence. Capture again, and let
+            // visual registration win before authorizing the terminal anchor.
+            const stableExtent = s.full.end;
+            if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
+            view = await scroll(s, x, view.y);
+            await extendEnd(s, view);
+            ({ view, dataUrl } = await capture(s, view));
+            const after = await request(s, "content", "BOTTOM").catch(error => {
+              if (error.translation) return null;
+              throw error;
+            });
+            if (after) { validateView(s, after); await extendEnd(s, after); }
+            const stable = s.captureExtentStable && s.full.end === stableExtent && after && !after.loading &&
+              after.height === view.height && after.y === view.y && after.x === view.x;
+            result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x, firstColumn: true,
+              uncertain: true, bottomExtent: stable ? stableExtent : undefined });
+            dataUrl = null;
+            recordVisual(s, result.visual, retry);
+          }
+          if (result.bottomTail) {
+            d.bottomTailAccepted++;
+            d.bottomTailRejected--;
+            d.trace.push({ event: "bottom-tail-anchored", result: "BOTTOM_ANCHORED_TAIL",
+              visualResult: result.visual.result, ...result.bottomTail, frame: s.frames });
+            if (d.trace.length > 150) d.trace.shift();
+          }
+        }
         if (!result.accepted) {
           if (retry < 2) continue;
           s.full.visual.visualFailures++;

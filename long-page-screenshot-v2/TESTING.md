@@ -222,3 +222,55 @@ Node 24.19.0、Chrome 152.0.7977.84。只运行了一轮完整矩阵（Node + 13
 - Documentation：`README.md`、`TESTING.md`。
 
 剩余限制以 README 的 Visual Continuity 一节为准：有界 1D 整数 CSS 注册、低信息/重复内容/大范围变化安全失败；不追溯更新已捕获前缀，不保证动态 outlier 自身时序一致；宽页面以首列注册每个 band；不支持虚拟列表、iframe 内独立滚动或任意二维变形。没有重测真实登录态 GitHub/CSDN，也没有测量浏览器总 RSS。
+
+## Full Page — Terminal Bottom-Tail Completion（2026-09-18）
+
+基线为已 fetch 确认的 `origin/main` `f462b43e4a1777f4201d53f465d953e16a664a07`。只改 V2。`capture/visual.js`、Region runtime、CaptureTarget detection、生产 manifest 和权限均未修改。
+
+CSDN 的问题被建模为终点小尾段无法唯一视觉注册：已提交 6384px，最终 extent 6428px，912px viewport 被物理底部 clamp 到 5516px，最后只前进 44px。matcher 的拒绝保持有效；新增路径只有在视觉失败、剩余尾段不超过 overlap 和 320px、物理可见底边一致（epsilon 0.01px），并经过现有四次 200ms bottom quiescence 后才有资格。重新获取 bitmap，复核截图前后高度、截图后 lazy image／位置，再次优先 matcher；仍失败才只提交末尾 novel pixels。
+
+新增 `capture/bottom-tail.js` 复用目标坐标进行资格和映射计算，background 负责 quiescence／fresh capture，offscreen 再次检查资格并裁剪。44px 案例源 y=868…912 → canonical y=6384…6428，最终高度为 6428，无重复 overlap 或漏行。失败位图不进入画布。
+
+### 定向测试
+
+`bottom-tail.test.mjs` 包含 10 个单元测试：1／44／228px 源目标映射、非底部／500px／过期 extent／无 coverage／超过 overlap 拒绝、320px hard cap、裁剪容器、actual offscreen 三种拒绝类型 fallback、visual matched 优先、底部四次 ready 样本／loading 重置／增长和移动撤销。和 background／visual 单测合计 29/29。
+
+`BOTTOM_TAIL_ONLY=1` 使用真实 `captureVisibleTab → offscreen → downloads`，独立 canvas reference 逐行比较所有 RGBA，包括 TOP／MIDDLE／BOTTOM、最后一行独立颜色、全部 seams：
+
+| Fixture | 断言 |
+| --- | --- |
+| CSDN-like 44px | 912 viewport、684 step；6364→6428 一次 +64 扩展，前面 8 次匹配通过；最后 expectedOffset=44、低信息拒绝后 anchor 44px；PNG 900×6428 |
+| 1px | canonical 6384→6385，仅最后一行补齐，PNG 900×6385 |
+| upper | remaining=228，恰好 overlap 上限；PNG 900×6612 |
+| not-bottom | 只剩 44px，但页面将实际滚动保持在 5472，底部为 6384≠6428；两次 retry 后 VISUAL_CONTINUITY_FAILED，无 PNG |
+| growing | 第一次 BOTTOM 采样时 6428→6500；撤销旧锚定、adaptive extension，最后按 6500 完成 116px |
+| late-growing | 四次稳定采样之后、获取新 bitmap 期间再增长到 6500；旧 extent 不授权锚定，重采后使用新 extent，完整像素 |
+| large | remaining=500，到达物理底部仍拒绝；两次 retry 后安全失败，无 PNG |
+| middle | 中间帧重复纹理 ambiguous；两次 retry 后安全失败，无 fallback／PNG |
+| nested | 700×912 element，44px terminal tail；PNG 700×6428，全行正确，window.scrollY 始终 0，scrollTop 恢复 317 |
+
+44px 场景另点击真实「复制诊断信息」，读回 clipboard，与 `diagnostics.visual` 完整比较；成功 reasonCode 仍为 null。新增 `bottomTailChecks`／`bottomTailAccepted`／`bottomTailRejected`，接受 trace 标记 `bottom-tail-anchored`／`BOTTOM_ANCHORED_TAIL`，保留原 visualResult 及最终 extent、提交前 end、tail、实际／最大 target scroll、viewport 和 novelPixels。trace 仍最多 150 条，不包含图像或页面正文。
+
+原 GitHub +45 fixture 保留；增加 912px viewport 的 GitHub recovery 场景，前两次位图注入瞬时不匹配内容后恢复，明确要求第三次 expectedOffset=456、matchedOffset=411、correction=-45。11 个 visual 场景均要求 bottomTailAccepted=0，GitHub 主体各行与 reference 一致。测试注入只存在于隔离测试 worker；生产 matcher 阈值、算法和 recovery 路径未变。
+
+开发定向按 terminal-tail、visual、adaptive、Full Page nested、dynamic Region、nested Region 顺序执行，未中途反复跑完整矩阵。增长 fixture 首次发现 pending witness 在 BOTTOM 抛出 FRAME_MOVED；修正为仅撤销本次 terminal anchor，沿用有界重采样，保持 Region 行为不变。新增 GitHub recovery fixture 显式控制前两次拒绝，而非假设所有 +45 页面都会先失败。
+
+定向最终结果：terminal-tail **9/9**、visual **11/11**、adaptive **6/6**、Full Page nested **11/11**、dynamic Region **17/17**、nested Region **7/7**，各组退出码 0。日志 `/tmp/bottom-target-{tail,visual,adaptive,full-nested,dynamic,nested}.log`；单元定向日志 `/tmp/bottom-node-target.log`。当前实际运行环境为 Node **24.19.0**、Chrome **153.0.8010.48**。
+
+### 完整回归与最终 review
+
+只运行一轮完整矩阵：Node **76/76**；Chrome basic、dynamic Region、nested Region、CSDN-like Region、Chat-like Region、complex、adaptive、proof、Full Page nested、visual、terminal-tail、diagnostics、Retina **13 组首轮全部退出 0**。包含 Full Page static、Region basic、取消、stale、真实 worker interruption、下载失败、offscreen 故障与清理；Retina 包含原生 2× Full Page CSS／device。
+
+output/UI 首轮在 CSS 模式点击「显示文件」后立即读取 worker，异步 background 消息尚未完成，读到 null 而非 downloadId。测试改为最多等待 2 秒观察真实按钮触发的 mocked API 调用，不修改生产 UI 或 Region runtime。仅定向补验该组，不重跑完整矩阵。
+
+完整轮原始日志及 `results.json`：`/var/folders/nz/q4cf3qtd54jd9030s2z8tmwr0000gn/T/bottom-tail-final-6lcx74d8/`；output/UI 补验日志：`/tmp/bottom-output-recheck.log`。原始失败记录保留，未将首轮写为全绿。
+
+最终仅涉及 11 个 V2 文件：
+
+- Runtime：`background.js`、`offscreen.js`、新增 `capture/bottom-tail.js`。
+- Tests：`tests/background.test.mjs`、`tests/browser.mjs`、`tests/visual.mjs`、新增 `tests/bottom-tail.test.mjs`、`tests/bottom-tail.mjs`、`tests/fixtures/test-bottom-tail-page.html`。
+- Docs：`README.md`、`TESTING.md`。
+
+没有修改 `capture/visual.js`、`content.js`、manifest、V0.1 或其它 extension；没有权限、依赖、站点 selector、临时 PNG／profile／log 入库。限制仍为一维多数 tile 注册；GitHub 少数动态 sidebar／toolbar 的局部 seam artifact 仅记录，不做 per-tile／seam carving／语义识别。底部稳定是有界观测；虚拟列表、无限 feed、iframe inner scroll、任意二维变形等仍不支持。本轮证据来自确定性本地 Chrome fixture，不声称重新验证真实登录态 GitHub／CSDN。
+
+output/UI 定向补验退出码 **0**：Auto／CSS／75／50／device 的完整像素、路径／show、面板取消／关闭、26000px Auto 缩至 16384px、单 PNG／底部完整、固定尺寸和极限预检拒绝全部通过。最终 **Node 76/76 + 14 个 Chrome 分组通过**；只运行一轮完整矩阵及上述 output/UI 单组补验。

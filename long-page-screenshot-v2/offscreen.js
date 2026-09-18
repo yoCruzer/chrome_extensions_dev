@@ -1,5 +1,6 @@
 import { outputGeometry, drawGeometry } from "./capture/geometry.js";
 import { VISUAL, overlapCSS, matchVertical } from "./capture/visual.js";
+import { bottomTail } from "./capture/bottom-tail.js";
 
 let session;
 let queue = Promise.resolve();
@@ -112,7 +113,7 @@ async function handle(m) {
     const bitmap = await decode(m.dataUrl);
     try {
       if (bitmap.width !== session.bitmapWidth || bitmap.height !== session.bitmapHeight) throw new Error("截图尺寸已变化，请保持窗口和缩放不变。");
-      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual;
+      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual, anchored;
       if (m.firstColumn && session.previous) {
         const expected = m.view.y - session.previous.documentY;
         const current = strip(bitmap, m.view, false, session.previous.strip.start - Math.max(1, expected - VISUAL.radius));
@@ -120,8 +121,11 @@ async function handle(m) {
         if (!visual || visual.result !== 'matched' || visual.correction !== 0) {
           visual = { ...matchVertical(session.previous.strip, current, expected), path: 'recovery' };
         } else visual.path = 'fast';
-        if (visual.result !== 'matched') return { accepted: false, visual };
-        canonicalY = session.previous.canonicalY + visual.matchedOffset;
+        if (visual.result !== 'matched') {
+          anchored = m.bottomExtent !== undefined && bottomTail(m.view, session.previous.end, m.bottomExtent);
+          if (!anchored) return { accepted: false, visual, canonicalEnd: session.previous.end };
+        }
+        canonicalY = anchored ? anchored.canonicalY : session.previous.canonicalY + visual.matchedOffset;
         novelTop = session.previous.end;
       }
       const localBottom = Math.min(m.view.clientHeight, m.view.height - m.view.y);
@@ -133,7 +137,7 @@ async function handle(m) {
       session.context.drawImage(bitmap, d.sx, d.sy, d.sw, d.sh, d.dx, d.dy, d.dw, d.dh);
       if (m.firstColumn) session.previous = { strip: strip(bitmap, m.view, true), canonicalY, end, documentY: m.view.y };
       session.canonicalEnd = end;
-      return { accepted: true, canonicalY, novelTop, end, right: rect.right, visual };
+      return { accepted: true, canonicalY, novelTop, end, right: rect.right, visual, bottomTail: anchored || undefined };
     } finally { bitmap.close(); }
   }
   if (m.type === "FULL_FINALIZE") {

@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { regionFromEdges, outputGeometry, sameViewport } from "../capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "../capture/planner.js";
+import { bottomTail } from "../capture/bottom-tail.js";
 import { overlapCSS } from "../capture/visual.js";
 const source = (await readFile(new URL("../background.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
@@ -29,7 +30,7 @@ test("startup close failure does not poison ready; new job completes and reveals
     downloads: { download: async options => { assert.doesNotMatch(options.filename, /part-/); return 8; },
       search: async () => [{ id: 8, state: "complete", filename: "/custom/chosen/result.png", fileSize: 42 }], cancel: async () => {}, show: async id => { shown = id; } }
   };
-  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, overlapCSS, setTimeout, setInterval, clearInterval });
+  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, overlapCSS, bottomTail, setTimeout, setInterval, clearInterval });
   const send = m => new Promise(resolve => listener({ target: "background", ...m }, { id: "test", url: "extension://popup.html" }, resolve));
   assert.equal((await send({ type: "STATUS" })).ok, true);
   assert.equal((await send({ type: "START", mode: "full" })).ok, true);
@@ -88,7 +89,7 @@ test('horizontal columns use the successfully repositioned visual band after rec
   const view = { x: 0, y: 0, width: 1600, height: 1000, clientWidth: 800, clientHeight: 600 };
   const s = { full: { end: 1000 }, region: { width: 1600 }, metrics: { captures: 1 }, frames: 0 };
   let rejects = 0;
-  const context = { overlapCSS, MAX_STEPS, bottomQuiescence: async () => true,
+  const context = { overlapCSS, bottomTail, MAX_STEPS, bottomQuiescence: async () => true,
     scroll: async (s, x, y) => { const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current; },
     extendEnd: async () => {}, capture: async (s, view) => { s.metrics.captures++; return { view, dataUrl: 'data:' }; },
     status: async () => {}, request: async (s, target, type, m) => {

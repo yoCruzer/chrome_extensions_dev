@@ -34,7 +34,7 @@
 
 - 普通页面单遍处理：滚到当前块，等待几何和可见图片稳定，立即截图并绘制，再前往下一块；不再无条件完整预滚动一遍。
 - 整页每块至少约 480 ms、区域约 240 ms 稳定等待；区域等待比较局部几何，不等待整个 document 静止。可见图片或局部几何在 5 秒内仍不稳定就有界重试／失败。截图调用间隔至少 550 ms，遵守 Chrome 限流。
-- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除要求视觉验证，不再触发整页重启。匹配失败最多重采两次，再以 `VISUAL_CONTINUITY_FAILED` 停止且不下载 PNG。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
+- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除要求视觉验证，不再触发整页重启。普通中间帧匹配失败最多重采两次，再以 `VISUAL_CONTINUITY_FAILED` 停止且不下载 PNG。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
 - 支持横向及纵向拼接，以实际可见坐标裁剪、按绝对输出边界取整，避免累计接缝误差。
 - 页面状态面板使用 Shadow DOM。截图前隐藏，并等待两次动画帧重绘；截图后恢复，面板不进入最终 PNG。
 - 通常仅保留当前帧和一个有界画布；动态扩展时短暂保留新旧两个画布，拷贝后立即释放旧画布。Auto 扩展超出原比例预算时会下采样已有像素；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
@@ -70,7 +70,7 @@ Full Page diagnostics 包含 `initialHeight`、`maxObservedHeight`、`endExtensi
 
 ## 已知限制
 
-fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复。Full Page 的普通流叶元素矩形仅提供几何警告；最终由相邻图像的有界视觉连续性决定拼接。DOM mutation 只标记 dirty 并触发几何复核，不构建语义 DOM 或全文指纹；最多记录 20,000 个几何见证。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
+fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复。Full Page 的普通流叶元素矩形仅提供几何警告；普通中间帧最终由相邻图像的有界视觉连续性决定拼接，严格底部小尾段另见下方 terminal anchor。DOM mutation 只标记 dirty 并触发几何复核，不构建语义 DOM 或全文指纹；最多记录 20,000 个几何见证。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
 
 不支持虚拟列表、无限 feed、iframe 内部独立滚动、任意二维嵌套滚动、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。持续可观察的选区 reflow 会有界失败；固定数字坐标不承诺跟随内容重排。锚点是按边缘距离／比例解析的视觉点，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
 
@@ -82,6 +82,7 @@ fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢�
 node --test long-page-screenshot-v2/tests/*.test.mjs
 node long-page-screenshot-v2/tests/browser.mjs
 VISUAL_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+BOTTOM_TAIL_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 OUTPUT_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 DYNAMIC_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 RELIABILITY_ONLY=csdn node long-page-screenshot-v2/tests/browser.mjs
@@ -118,10 +119,10 @@ API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 
 - 重叠：`min(clientHeight - 32, clamp(clientHeight * 0.25, 160, 320))` CSS px；常规 700px 视口每次前进 525px。小视口保留至少 32px 前进空间。
 - 表示：offscreen 从实际 bitmap 裁出 CaptureTarget 条带，横向约 4 CSS px 一采样，宽度最多 384；纵向保留 1 CSS px 精度。灰度用于搜索，额外紧凑 RGB 样本仅核验最佳候选，防止不同彩色渐变出现灰度别名。条带高度最多 `overlap + 2*96 + 64`，即 576 行；底部大重叠时移动当前条带采样起点。
-- 搜索：12 个横向 tiles，预计位移 ±96 CSS px，每个候选使用相同的行区间；不做旋转、缩放或横向注册。稳定几何 fast path 每 tile 最多采 24 行、横向每 6 个表示像素一取样。发现 witness／extent 变化、非零修正或快速检查不通过，改为最多 64 行、横向每 2 个表示像素取样。两条路径均检查第二候选，不能用 geometry 绕过低信息或歧义拒绝。
+- 搜索：12 个横向 tiles，预计位移 ±96 CSS px，每个候选使用相同的行区间；不做旋转、缩放或横向注册。稳定几何 fast path 每 tile 最多采 24 行、横向每 6 个表示像素一取样。发现 witness／extent 变化、非零修正或快速检查不通过，改为最多 64 行、横向每 2 个表示像素取样。两条路径均检查第二候选；普通中间帧不能用 geometry 绕过低信息或歧义拒绝。
 - 共识：灰度标准差至少 5，采样行间的平均垂直变化至少 0.05（排除只在横向有边框、纵向恒定的 tile）；至少 3 个 informative tiles，且至少 60% 同意同一个整数 CSS 位移。最佳归一化平均绝对误差 ≤0.04，灰度及最佳候选 RGB 平均误差均 ≤0.5（0–255）。第二候选误差差距至少 `min(0.018, max(0.005, bestError * 0.5))`；近乎精确匹配允许较小差距，噪声近似匹配不能靠相邻 offset 猜测。分数为 `1/(1+error)`，confidence 为 agreementRatio × bestScore。
 - canonical 坐标：首帧起点 0；后续为上一帧 canonicalY + matchedOffset。只绘制上次 committed end 之后的部分，源裁剪仍使用当前目标视口。文档高度用于滚动终点和增长保护，最终 PNG 高度按 canonical end 裁定，不加入因坐标修正产生的空白尾带。
-- 失败：第一次重试在原位置重新 settle/capture；第二次后退一个有界 overlap（最多 320px），增加共享内容。两次后仍无可靠匹配则停止，不重启整个截图、不输出部分 PNG。目标丢失、导航、环境变化和无限增长保护继续生效；容器 viewport resize 仍使用原有一次重建策略。
+- 失败：第一次重试在原位置重新 settle/capture；第二次后退一个有界 overlap（最多 320px），增加共享内容。两次后仍无可靠匹配则停止，不重启整个截图、不输出部分 PNG；唯一例外是下方经过验证的 terminal bottom tail。目标丢失、导航、环境变化和无限增长保护继续生效；容器 viewport resize 仍使用原有一次重建策略。
 - 横向超宽页：每个纵向 band 的首列建立视觉注册，其它横向列沿用该 band 的 canonical 坐标和原有几何裁剪。因此对跨列独立纵向变形不作保证；主要模型仍是纵向截图。
 
 `diagnostics.visual` 包含 `visualChecks`、`visualFastPath`、`visualRecoveries`、`visualRecoveryRetries`、`visualFailures`、`ambiguousMatches`、`lowInformationRejects`，及最近 150 次匹配 trace（预计／实际位移、修正、搜索半径、重叠、tile 数、共识比例、两候选分数、confidence、path、result）。复制诊断包含这些安全数值，不包含像素、页面文本、HTML、URL、图片数据。
@@ -129,3 +130,19 @@ API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/t
 复杂度为 O(T × R × N)，T≤12、R≤193、N 为每 tile 的有界采样数，另有每 tile 的候选排序 O(R log R)。只长期保留上一帧 ≤384×576 的灰度 Float32 与 RGB Uint8 条带，约 1.48 MiB；匹配期间另有当前条带和临时 canvas/ImageData，帧后可回收。不保留全部截图；ImageBitmap 在 finally 中关闭。输出画布预算仍为 16M 像素，扩展／裁定尺寸期间短暂双画布。
 
 边界：超过 ±96px 的真实位移、过少纹理、重复内容、显著亚像素变化或不足 60% 的一致证据可能安全失败。已经捕获区域后来新插入的内容不会追溯添加到 PNG；这是连续浏览路径的记录，不是网页最终时刻的全局快照。不会保证动态侧栏本身时序一致，也不能保证虚拟列表或大范围重绘可拼接。确定性 fixture 通过不等于已认证真实登录态 GitHub/CSDN。
+
+
+### Full Page Terminal Bottom Tail
+
+最后只能滚动几像素时，大面积 overlap 可能缺乏唯一视觉证据。保留原 matcher 的 ±96、12 tiles、至少 3 tiles、60% 共识、margin 及 RGB 验证；正常匹配始终优先。仅在首列视觉匹配失败／ambiguous／low-information 后，才检查 terminal bottom anchor：
+
+- CaptureTarget 当前可见底边与最终 extent 相差不超过 0.01 CSS px；window 和 element 使用同一目标坐标检查，底边在 bitmap 外的裁剪容器不能通过。
+- `0 < finalExtent - canonicalCommittedEnd <= min(overlapCSS(clientHeight), 320)`，已有非空提交内容；普通中间帧和大缺口不能使用此路径。
+- 调用原 bottom quiescence，连续四次 200ms 高度稳定且可见 lazy image 就绪。增长、目标移动或未提交帧重排撤销本次锚定资格，回到有界重采样和 adaptive extension。
+- 稳定后重新截图；截图前后 extent 必须仍一致，截图后再检查目标位置／高度和 visible lazy image。新 bitmap 再次优先运行 matcher，仍失败才使用 anchor，不复用等待前缓存的帧。
+
+Canonical 映射为 `canonicalY = finalExtent - viewportHeight`、`novelTop = canonicalCommittedEnd`。例如 finalExtent=6428、committedEnd=6384、viewport=912，只取当前 bitmap 中 868…912 的最后 44px，写到 canonical 6384…6428；不重写 868px overlap。最终 PNG 按已提交 canonical end 裁定。增长后的最终稳定高度参与判断，初始高度不能授权提前结束。
+
+`diagnostics.visual` 新增 `bottomTailChecks`、`bottomTailAccepted`、`bottomTailRejected`；一次检查未使用 anchor（包括新截图已视觉匹配）计入 rejected。接受时 trace 记录 `event=bottom-tail-anchored`、`result=BOTTOM_ANCHORED_TAIL`、原 `visualResult`、finalExtent、canonicalEndBefore、remainingTail、actualTargetScrollY、maxTargetScrollY、viewportHeight 和 novelPixels。正常视觉成功不标记 fallback，任务仍以正常成功结束；原复制诊断入口保留。
+
+GitHub 多数 tiles 确定的一维全局对齐可能让少数动态 sidebar／toolbar 留下局部 seam artifact。本轮只解决严格底部小尾段，不增加 per-tile 坐标、seam carving 或语义侧栏识别。底部稳定仍是有界时间观测，不保证未来不再加载；不追溯改写已提交前缀，也不保证任意动态内容的最终时刻快照。Region runtime 和 CaptureTarget detection 未改变。
