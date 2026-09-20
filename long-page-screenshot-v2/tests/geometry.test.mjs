@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, drawGeometry, pixelEdge, MAX_PIXELS, sameViewport } from "../capture/geometry.js";
+import { regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, drawGeometry, pixelEdge, MAX_PIXELS, AUTO_SCALE, sameViewport } from "../capture/geometry.js";
 import { visibleTile } from "../capture/planner.js";
 
 test("selection validates all four document edges", () => {
@@ -66,7 +66,7 @@ test("Full Page rejects oversized width and strict viewport changes", () => {
   assert.equal(sameViewport({ dpr: 1 }, { dpr: 2 }), false);
 });
 
-for (const [mode, ratio] of [["auto", 1], ["css", 1], ["75", 0.75], ["50", 0.5], ["device", 2]]) {
+for (const [mode, ratio] of [["auto", AUTO_SCALE], ["css", 1], ["75", 0.75], ["50", 0.5], ["device", 2]]) {
   test(`output mode ${mode} separates bitmap sampling from CSS output scale`, () => {
     const region = { x: 0, y: 0, width: 800, height: 2000 };
     const out = outputGeometry(region, { innerWidth: 800, innerHeight: 600 }, { width: 1600, height: 1200 }, mode);
@@ -77,19 +77,19 @@ for (const [mode, ratio] of [["auto", 1], ["css", 1], ["75", 0.75], ["50", 0.5],
   });
 }
 
-test("Auto reduces to one bounded canvas; fixed and unreadably small output fail explicitly", () => {
+test("Auto keeps a balanced scale and plans multiple bounded parts instead of shrinking to one canvas", () => {
   const view = { innerWidth: 900, innerHeight: 700 }, bitmap = { width: 1800, height: 1400 };
   const region = { x: 0, y: 0, width: 900, height: 26000 };
   const out = outputGeometry(region, view, bitmap);
-  assert.ok(out.width * out.height <= MAX_PIXELS); assert.ok(out.height <= 16384);
-  assert.throws(() => outputGeometry(region, view, bitmap, "css"), /自动/);
-  assert.throws(() => outputGeometry({ ...region, height: 1000000 }, view, bitmap), /缩小截图区域/);
-});
-
-test("Auto rounds repeatedly until the 16 MP budget is satisfied", () => {
-  const out = outputGeometry({ x: 0, y: 0, width: 1030, height: 15878 },
-    { innerWidth: 900, innerHeight: 700 }, { width: 900, height: 700 });
-  assert.ok(out.width * out.height <= MAX_PIXELS);
+  assert.equal(out.scaleX, AUTO_SCALE);
+  assert.equal(out.width, Math.round(900 * AUTO_SCALE));
+  assert.equal(out.height, Math.round(26000 * AUTO_SCALE));
+  assert.ok(out.partHeight <= 16384);
+  assert.ok(out.width * out.partHeight <= MAX_PIXELS);
+  assert.ok(out.partCount > 1);
+  const css = outputGeometry(region, view, bitmap, "css");
+  assert.equal(css.scaleX, 1);
+  assert.ok(css.partCount >= out.partCount);
 });
 
 test('nested target crop adds browser viewport origin using bitmap-derived scale', () => {

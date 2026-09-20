@@ -11,9 +11,10 @@
     progress.status = status;
     host.style.setProperty("visibility", "visible", "important");
     shadow.querySelector("p").textContent = status.message;
-    const result = status.result;
-    shadow.querySelector("pre").textContent = result
-      ? `${result.filename.split(/[\\/]/).pop()}\n${result.filename}\n${result.width} × ${result.height} 像素${result.bytes >= 0 ? ` · ${(result.bytes / 1048576).toFixed(2)} MB` : ""}` : "";
+    const result = status.result, results = status.results || (result ? [result] : []);
+    shadow.querySelector("pre").textContent = results.length
+      ? results.map(item => `${item.filename.split(/[\\/]/).pop()}\n${item.filename}\n${item.width} × ${item.height} 像素${item.bytes >= 0 ? ` · ${(item.bytes / 1048576).toFixed(2)} MB` : ""}`).join("\n\n")
+      : "";
     shadow.querySelector("#cancel").hidden = !status.busy;
     shadow.querySelector("#close").hidden = !!status.busy;
     shadow.querySelector("#diagnostics").hidden = !!status.busy;

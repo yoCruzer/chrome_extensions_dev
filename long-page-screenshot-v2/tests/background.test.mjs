@@ -9,17 +9,18 @@ import { VISUAL, overlapCSS } from "../capture/visual.js";
 const source = (await readFile(new URL("../background.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
 test("startup close failure does not poison ready; new job completes and reveals actual download", async () => {
-  let listener, closes = 0, contexts = [{}], saved, shown, hidden = false;
+  let listener, closes = 0, contexts = [{}], saved, shown, hidden = false, openedScale;
   const events = [], view = { x: 0, y: 0, width: 800, height: 600, innerWidth: 800, innerHeight: 600, clientWidth: 800, clientHeight: 600, dpr: 1, visualScale: 1 };
   const event = { addListener() {} };
   const chrome = {
     runtime: { id: "test", getURL: path => `extension://${path}`, getContexts: async () => contexts,
       onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => {
         events.push(m.type);
-        if (m.type === "OPEN") return { ok: true, ...outputGeometry(m.region, m.view, { width: 800, height: 600 }, m.output) };
+        if (m.type === "OPEN") { openedScale = outputGeometry(m.region, m.view, { width: 800, height: 600 }, m.output); return { ok: true, ...openedScale }; }
         if (m.type === "FULL_FRAME") return { ok: true, accepted: true, canonicalY: 0, novelTop: 0, end: 600, right: 800 };
-        if (m.type === "FULL_FINALIZE") return { ok: true, width: 800, height: 600 };
-        return { ok: true, url: "blob:test" };
+        if (m.type === "FULL_FINALIZE") return { ok: true, ...openedScale };
+        if (m.type === "EXPORT") return { ok: true, parts: [{ url: "blob:test", width: openedScale.width, height: openedScale.height, index: 0, count: 1 }] };
+        return { ok: true };
       } },
     storage: { session: { get: async () => ({}), set: async data => { saved = data.status; } } },
     offscreen: { closeDocument: async () => { if (++closes === 1) throw new Error("transient close"); contexts = []; }, createDocument: async () => { contexts = [{}]; } },
@@ -37,8 +38,9 @@ test("startup close failure does not poison ready; new job completes and reveals
   for (let i = 0; i < 300 && saved?.busy; i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(saved.state, "complete");
   assert.equal(saved.result.filename, "/custom/chosen/result.png");
-  assert.equal(saved.result.width, 800);
+  assert.equal(saved.result.width, 720);
   assert.equal(saved.parts, 1);
+  assert.equal(saved.results.length, 1);
   assert.ok(closes >= 3);
   assert.ok(events.includes("FINISH"));
   assert.equal((await send({ type: "CANCEL", id: "old" })).ok, false);
@@ -189,12 +191,12 @@ test('download filename is UTF-8 byte bounded and retries with a timestamp-only 
   let bytes=0;for(const ch of basename)bytes+=context.utf8CodePointBytes(ch);
   assert.ok(bytes < 220, `basename bytes=${bytes}`);
   assert.doesNotMatch(safe, /[\\:*?"<>|]/);
-  const s={tab:{title:chinese},stamp:'2026-09-20T00-00-00-000Z',metrics:{filenameFallbacks:0},outputSize:{width:1,height:1},parts:0};
-  await context.saveImage(s,'blob:test');
+  const s={tab:{title:chinese},stamp:'2026-09-20T00-00-00-000Z',metrics:{filenameFallbacks:0},parts:0};
+  const saved=await context.saveImage(s,{url:'blob:test',width:1,height:1},0,1);
   assert.equal(attempts.length,2);
   assert.match(attempts[1],/LongScreenshot\/2026-09-20T00-00-00-000Z-capture\.png$/);
   assert.equal(s.metrics.filenameFallbacks,1);
-  assert.equal(s.result.filename,'/chosen/result.png');
+  assert.equal(saved.filename,'/chosen/result.png');
 });
 
 test('START validates Full Page policy and omits it for Region', async () => {
@@ -225,4 +227,29 @@ test('Region relativeView normalizes horizontal output to zero while preserving 
   assert.equal(normalized.x,0);
   assert.equal(normalized.cropLeft,200);
   assert.equal(normalized.y,1000);
+});
+
+
+test('multi-part save uses ordered suffixes and preserves actual DownloadItem paths', async () => {
+  const helperSource=source.slice(source.indexOf('function utf8CodePointBytes'),source.indexOf('async function run'));
+  const attempts=[];let next=0;
+  const context={
+    chrome:{downloads:{
+      download:async options=>{attempts.push(options.filename);return ++next},
+      search:async ({id})=>[{id,state:'complete',filename:`/chosen/part-${id}.png`,fileSize:id*100}]
+    }},
+    status:async()=>{},check:()=>{},delay:async()=>{}
+  };
+  vm.runInNewContext(helperSource,context);
+  const s={tab:{title:'Fixture'},stamp:'2026-09-20T00-00-00-000Z',metrics:{filenameFallbacks:0},parts:0};
+  const parts=[
+    {url:'blob:1',width:900,height:16384},
+    {url:'blob:2',width:900,height:3416}
+  ];
+  const saved=[];
+  for(let i=0;i<parts.length;i++)saved.push(await context.saveImage(s,parts[i],i,parts.length));
+  assert.match(attempts[0],/-01-of-02\.png$/);
+  assert.match(attempts[1],/-02-of-02\.png$/);
+  assert.deepEqual(saved.map(x=>x.filename),['/chosen/part-1.png','/chosen/part-2.png']);
+  assert.equal(s.parts,2);
 });

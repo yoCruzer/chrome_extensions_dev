@@ -121,7 +121,7 @@ try {
     await testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG });
   } else if (process.env.OUTPUT_ONLY) {
     const panel = page.locator("#long-screenshot-v2-progress");
-    for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5], ["device", 1]]) {
+    for (const [output, ratio] of [["auto", .9], ["css", 1], ["75", .75], ["50", .5], ["device", 1]]) {
       const job = await capture("region", output);
       await selectRegion(job, { left: 0, top: 0, right: 800, bottom: 1800 });
       await waitFor(s => s.state === "loading");
@@ -161,26 +161,34 @@ try {
     console.log("PASS page-panel cancel and persistent completion close");
     await page.evaluate(() => { document.querySelector("canvas").style.width = "1500px"; document.querySelector("canvas").style.height = "26000px"; });
     await capture("full", "css");
-    const oversized = await waitFor(s => !s.busy);
-    assert.equal(oversized.state, "failed"); assert.match(oversized.message, /自动/);
-    assert.equal(oversized.metrics.captures, 0);
+    const cssLong = await waitFor(s => !s.busy);
+    assert.equal(cssLong.state, "complete", JSON.stringify(cssLong));
+    assert.equal(cssLong.parts, 2);
+    assert.equal(cssLong.results.length, 2);
+    assert.match(cssLong.results[0].filename, /-01-of-02\.png$/);
+    assert.match(cssLong.results[1].filename, /-02-of-02\.png$/);
+    const cssPNGs = await Promise.all(cssLong.results.map(async item => PNG.sync.read(await readFile(item.filename))));
+    assert.deepEqual(cssPNGs.map(png => [png.width, png.height]), [[900, 16384], [900, 9616]]);
+    assert.equal(cssPNGs.reduce((sum, png) => sum + png.height, 0), 26000);
+
     await capture("full", "auto");
-    const reduced = await waitFor(s => !s.busy);
-    assert.equal(reduced.state, "complete", JSON.stringify(reduced));
-    assert.equal(reduced.parts, 1);
-    const reducedPNG = PNG.sync.read(await readFile(reduced.result.filename));
-    assert.ok(reducedPNG.width * reducedPNG.height <= 16000000);
-    assert.equal(reducedPNG.height, 16384);
-    for (let y = 0; y < reducedPNG.height; y++) assert.equal(reducedPNG.data[(y * reducedPNG.width + 10) * 4 + 2], 97);
-    const bottom = ((reducedPNG.height - 1) * reducedPNG.width + 10) * 4;
-    assert.ok(Math.abs(reducedPNG.data[bottom] - (10336 % 251)) <= 2);
-    assert.equal(reducedPNG.data[bottom + 1], Math.floor(10336 / 251));
+    const balanced = await waitFor(s => !s.busy);
+    assert.equal(balanced.state, "complete", JSON.stringify(balanced));
+    assert.equal(balanced.parts, 2);
+    assert.equal(balanced.results.length, 2);
+    const autoPNGs = await Promise.all(balanced.results.map(async item => PNG.sync.read(await readFile(item.filename))));
+    assert.deepEqual(autoPNGs.map(png => [png.width, png.height]), [[810, 16384], [810, 7016]]);
+    assert.equal(autoPNGs.reduce((sum, png) => sum + png.height, 0), 23400);
+    const panelText = await panel.locator("section").innerText();
+    assert.ok(panelText.includes(balanced.results[0].filename));
+    assert.ok(panelText.includes(balanced.results[1].filename));
+
     await page.evaluate(() => { document.querySelector("canvas").style.height = "1000000px"; });
     await capture("full");
     const extreme = await waitFor(s => !s.busy);
-    assert.equal(extreme.state, "failed"); assert.match(extreme.message, /缩小截图区域/);
+    assert.equal(extreme.state, "failed"); assert.match(extreme.message, /需要 .* 张图片|缩小区域/);
     assert.equal(extreme.metrics.captures, 0);
-    console.log("PASS Auto reduction, single PNG, bottom, fixed-size and extreme preflight rejection");
+    console.log("PASS balanced Auto and CSS multi-part output with ordered files and extreme part-count guard");
   } else if (process.env.COMPLEX_ONLY) {
     await testComplexPage({ page, worker, message, waitFor, capture, selectRegion, root, PNG });
   } else if (process.env.NATIVE_DPR) {

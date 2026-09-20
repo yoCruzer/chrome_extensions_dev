@@ -65,13 +65,13 @@ async function finish(s, error) {
     await chrome.runtime.sendMessage({ target: "offscreen", type: "CLOSE", id: s.id }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
   }
-  lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
+  lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result, results: s.results,
     metrics: { ...s.metrics, totalMs: Date.now() - s.started },
     ...(s.mode === "full" ? { attempt: s.attempt || 1, reasonCode: error?.reasonCode, diagnostics: { ...s.full, warmup: s.warmup || null, continuityPolicy: s.continuityPolicy, fullProof: s.fullProofDiagnostics ? { ...s.fullProofDiagnostics, trigger: error?.fullProofTrigger || s.fullProofDiagnostics.trigger } : null, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
     ...(s.mode === "region" ? { reasonCode: error ? error.reasonCode || "CAPTURE_FAILED" : undefined,
       attempt: s.attempt || 1, diagnostics: { ...s.diagnostics, ...error?.diagnostics } } : {}),
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
-    message: error ? error.message : "截图完成，已保存一张 PNG。" };
+    message: error ? error.message : `截图完成，已保存 ${s.parts || 1} 张 PNG。` };
   await chrome.tabs.sendMessage(s.tab.id, { target: "content", type: "PROGRESS", id: s.id, status: lastStatus }, { frameId: 0 }).catch(() => {});
   try { await chrome.storage.session.set({ status: lastStatus }); }
   finally { if (active === s) active = null; }
@@ -532,26 +532,30 @@ function suggestedFilename(stamp, title) {
   return `LongScreenshot/${stamp}-${safeTitle(title)}.png`;
 }
 
-async function saveImage(s, url) {
-  await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
+async function saveImage(s, part, index, count) {
+  await status(s, "saving", count > 1
+    ? `正在保存第 ${index + 1}/${count} 张，若弹出保存窗口请选择位置…`
+    : "正在保存，若弹出保存窗口请选择位置…");
   check(s);
-  const filename = suggestedFilename(s.stamp, s.tab.title);
+  const suffix = count > 1 ? `-${String(index + 1).padStart(2, "0")}-of-${String(count).padStart(2, "0")}` : "";
+  const filename = `LongScreenshot/${s.stamp}-${safeTitle(s.tab.title)}${suffix}.png`;
   try {
-    s.downloadId = await chrome.downloads.download({ url, filename });
+    s.downloadId = await chrome.downloads.download({ url: part.url, filename });
   } catch (error) {
     if (!/invalid filename/i.test(error?.message || "")) throw error;
     s.metrics.filenameFallbacks++;
-    s.downloadId = await chrome.downloads.download({ url, filename: `LongScreenshot/${s.stamp}-capture.png` });
+    s.downloadId = await chrome.downloads.download({ url: part.url,
+      filename: `LongScreenshot/${s.stamp}-capture${suffix}.png` });
   }
-  await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
   const started = Date.now();
   while (Date.now() - started < 120_000) {
     check(s);
     const [item] = await chrome.downloads.search({ id: s.downloadId });
     if (!item || item.state === "interrupted") throw new Error(`下载失败：${item?.error || "记录不存在"}`);
     if (item.state === "complete") {
-      s.result = { downloadId: item.id, filename: item.filename, width: s.outputSize.width, height: s.outputSize.height, bytes: item.fileSize };
-      s.downloadId = null; s.parts++; return;
+      const result = { downloadId: item.id, filename: item.filename, width: part.width, height: part.height,
+        bytes: item.fileSize, index, count };
+      s.downloadId = null; s.parts++; return result;
     }
     await delay(250);
   }
@@ -642,7 +646,7 @@ async function run(s) {
         await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["BLOBS"], justification: "Incrementally stitch frames into one bounded PNG." });
         const scale = await request(s, "offscreen", "OPEN", { region: s.region, view: relativeView(s, view), dataUrl, output: s.output, ...(s.mode === "full" ? { continuityPolicy: s.continuityPolicy } : {}) });
         s.outputSize = scale;
-        await request(s, "offscreen", "PART", { start: 0, height: scale.height });
+        await request(s, "offscreen", "PART", { start: 0, height: scale.partHeight });
         if (s.mode === "full") {
           const captureTask = captureFull(s, view, dataUrl);
           dataUrl = null;
@@ -677,13 +681,17 @@ async function run(s) {
           await ensureVisible(s);
           validateView(s, await request(s, "content", "MEASURE"));
         }
-        await status(s, "encoding", `正在生成图片 · ${s.outputSize.width} × ${s.outputSize.height} 像素…`);
+        await status(s, "encoding", s.outputSize.partCount > 1
+          ? `正在生成 ${s.outputSize.partCount} 张图片 · ${s.outputSize.width} × ${s.outputSize.height} 总像素…`
+          : `正在生成图片 · ${s.outputSize.width} × ${s.outputSize.height} 像素…`);
         const encodeStart = Date.now();
-        const { url } = await request(s, "offscreen", "EXPORT");
+        const exported = await request(s, "offscreen", "EXPORT");
         s.metrics.encodeMs += Date.now() - encodeStart;
         s.stamp = new Date().toISOString().replace(/[:.]/g, "-");
         const saveStart = Date.now();
-        await saveImage(s, url);
+        s.results = [];
+        for (const part of exported.parts) s.results.push(await saveImage(s, part, part.index, part.count));
+        s.result = s.results[0];
         s.metrics.saveMs += Date.now() - saveStart;
         await request(s, "offscreen", "RELEASE", { final: true });
         break;

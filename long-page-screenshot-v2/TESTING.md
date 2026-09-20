@@ -373,3 +373,27 @@ Deterministic tests must evaluate the frozen visual Scope, not require the final
 - Region scroll 保持当前 horizontal scroll，只改变 y；
 - normalized Region view.x=0，visibleTile 不再规划横向第二列；
 - Full Page 不修改。
+
+## Phase 3 — Balanced Auto + automatic Multi-part output（2026-09-20）
+
+本阶段改变的是输出规划／renderer，不改变已通过真实页面验收的 Full Page Robust continuity、warm-up、vertical-only Capture 或 Region viewport-fixed horizontal crop。
+
+目标语义：
+
+- Auto 固定目标约 CSS 90%，不再随总高度继续降低比例；CSS/75%/50%/Device 均保持请求比例。
+- 单个 part 继续受 16 MP / 16384px envelope 约束；总输出允许多个 part。
+- `outputGeometry` 返回 `partHeight / partCount`；当前最多 24 parts。
+- offscreen 只保留一个活动 part canvas。frame 若跨 part 边界，在输出像素空间拆成两个 draw segment；part 满后立即 encode 为 Blob URL 并释放 canvas。
+- Full Page `EXTEND` 只能增加 total height / partCount，不得改变 scaleX/scaleY/partHeight。
+- `EXPORT` 返回有序 parts；最终 `RELEASE` 必须 revoke 所有 URLs。
+- background 依次下载 `-01-of-03.png` 等文件，保存真实 `DownloadItem.filename` 到 `results[]`；单 part 不增加 suffix。
+- 页面结果面板展示所有 parts 的实际路径／尺寸；Finder 按钮仍定位第一张。
+
+定向证据要求：
+
+1. geometry：900×26000 CSS 页面 Auto→810×23400 total，part canvas 保持安全；CSS→900×26000，不再失败。
+2. rolling renderer：1000×22000 Region Auto→900×19800，输出 parts 高度 16384 + 3416；跨 part frame 产生额外 draw segment，parts 高度和精确等于 total height。
+3. dynamic extension：12000→26000 时 Auto 始终 scale=0.9，最终 total=23400、partCount=2，不重采/下采样已提交像素。
+4. resource cleanup：成功 final release、encode failure、pagehide 都释放 canvas/URLs，并允许新 session。
+5. save：多 part 使用顺序 suffix；结果记录真实 Chrome 下载路径。
+6. OUTPUT_ONLY 浏览器回归：短 Region Auto 变为 90%；26000px Full Page 的 CSS 与 Auto 均成功多图；极端高度仅在超过 24 parts 时预检失败。
