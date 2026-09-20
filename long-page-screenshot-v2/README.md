@@ -173,3 +173,17 @@ GitHub 多数 tiles 确定的一维全局对齐可能让少数动态 sidebar／t
 8. Strict 完全保持 verified-only，不接受 Robust fallback。
 
 Diagnostics 新增 `probablePlacements`、`geometryFallbacks`、`probableVisualCorrections`；trace 保留原 visual result，同时记录 `continuity`、`fallbackMethod`、`placementOffset`、`placementCorrection`，避免把 fallback 冒充成 verified match。
+
+### Completion-First Reset — Phase 1.1（Bounded Warm-up + evidence diagnostics）
+
+Full Page 在正式建立 proof/canvas 之前先做一次**有界预滚**，用于触发首轮 lazy load、sticky/layout 状态和有限尾部增长：
+
+- 从 CaptureTarget 顶部开始，以约 0.9 viewport 步进；
+- 最多 24 步、15 秒、6 次增长事件；
+- 高度超过 warmup 初始高度的 2× 或 +4 viewport 中较大值时停止追增长；
+- 到达物理底部且下一次 settle 不再增长时记为 `bottom-stable`；
+- warmup 的普通 settle 超时是 discovery failure，不直接宣告截图失败；返回顶部后仍进入正式 capture；
+- target/environment/cancel 等真正环境错误仍立即终止；
+- warmup 完成后回到顶部，随后才 `FULL_RESET` 并建立正式 proof，因此 warmup 帧不会进入画布或 committed witness。
+
+复制 diagnostics 新增安全数值 `warmup`；visual trace 新增 `qualityTiles`、`qualityRatio` 和 `failureReason`（`low-information / insufficient-consensus / insufficient-quality / width-mismatch / insufficient-overlap / strict-zone`）。本阶段仍**不**把 `insufficient-quality` 自动放行，只用于确认 GitHub/CSDN 当前的真实失败类型。

@@ -66,7 +66,7 @@ async function finish(s, error) {
   }
   lastStatus = { id: s.id, tabId: s.tab.id, busy: false, frames: s.frames, parts: s.parts, result: s.result,
     metrics: { ...s.metrics, totalMs: Date.now() - s.started },
-    ...(s.mode === "full" ? { attempt: s.attempt || 1, reasonCode: error?.reasonCode, diagnostics: { ...s.full, continuityPolicy: s.continuityPolicy, fullProof: s.fullProofDiagnostics ? { ...s.fullProofDiagnostics, trigger: error?.fullProofTrigger || s.fullProofDiagnostics.trigger } : null, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
+    ...(s.mode === "full" ? { attempt: s.attempt || 1, reasonCode: error?.reasonCode, diagnostics: { ...s.full, warmup: s.warmup || null, continuityPolicy: s.continuityPolicy, fullProof: s.fullProofDiagnostics ? { ...s.fullProofDiagnostics, trigger: error?.fullProofTrigger || s.fullProofDiagnostics.trigger } : null, terminationReason: error ? error.reasonCode || "CAPTURE_FAILED" : "BOTTOM_QUIESCENT" } } : {}),
     ...(s.mode === "region" ? { reasonCode: error ? error.reasonCode || "CAPTURE_FAILED" : undefined,
       attempt: s.attempt || 1, diagnostics: { ...s.diagnostics, ...error?.diagnostics } } : {}),
     state: error ? (s.cancelled ? "cancelled" : "failed") : "complete",
@@ -112,6 +112,12 @@ async function ensureVisible(s) {
 }
 
 function validateView(s, view) {
+  if (s.mode === "full" && s.warming) {
+    if (["innerWidth", "innerHeight", "dpr", "visualScale"].some(key => view[key] !== s.viewport[key]) || view.visualScale !== 1) {
+      throw Object.assign(new Error("预加载期间视口或缩放已改变，请保持窗口尺寸与缩放不变。"), { reasonCode: "CAPTURE_ENV_CHANGED" });
+    }
+    return;
+  }
   if (s.mode === "region") {
     s.lastView = view;
     validateEnvironment(s, { ...view, tabZoom: view.tabZoom ?? s.environment.tabZoom, tabId: s.tab.id });
@@ -169,7 +175,9 @@ function relativeView(s, view) {
 async function scroll(s, x, y) {
   s.scrollTarget = { x, y };
   s.metrics.settles++;
-  await status(s, s.frames ? "capturing" : "loading", `正在等待当前内容稳定 / 加载 · 已处理 ${s.frames} 帧…`);
+  await status(s, s.frames ? "capturing" : "loading", s.warming
+    ? `正在预加载页面内容 · 已滚动 ${s.warmup?.steps || 0} 步…`
+    : `正在等待当前内容稳定 / 加载 · 已处理 ${s.frames} 帧…`);
   await ensureVisible(s);
   if (s.mode === "region") await delay(Math.max(0, 550 - (Date.now() - lastCapture)));
   const view = await request(s, "content", "SCROLL", s.mode === "region"
@@ -177,6 +185,72 @@ async function scroll(s, x, y) {
     : { x: Math.floor(x), y: Math.floor(y) });
   validateView(s, view);
   return view;
+}
+
+
+const WARMUP_MAX_STEPS = 24;
+const WARMUP_MAX_MS = 15_000;
+const WARMUP_MAX_GROWTHS = 6;
+
+async function warmupFull(s, initialView) {
+  const started = Date.now();
+  const d = s.warmup = { steps: 0, growthEvents: 0, initialHeight: initialView.height,
+    maxObservedHeight: initialView.height, finalHeight: initialView.height,
+    completed: false, stopReason: null, durationMs: 0 };
+  let view = initialView, warmupError;
+  s.warming = true;
+  try {
+    view = await scroll(s, 0, 0);
+    d.initialHeight = view.height;
+    d.maxObservedHeight = view.height;
+    let y = view.y;
+    const maxHeight = Math.max(view.height * 2, view.height + view.clientHeight * 4);
+    while (d.steps < WARMUP_MAX_STEPS && Date.now() - started < WARMUP_MAX_MS) {
+      check(s);
+      const maxY = Math.max(0, view.height - view.clientHeight);
+      if (maxY <= 0.5) { d.completed = true; d.stopReason = "single-viewport"; break; }
+      const nextY = Math.min(maxY, y + Math.max(320, Math.floor(view.clientHeight * 0.9)));
+      const beforeHeight = view.height;
+      view = await scroll(s, 0, nextY);
+      d.steps++;
+      if (view.height > d.maxObservedHeight + 0.5) d.growthEvents++;
+      d.maxObservedHeight = Math.max(d.maxObservedHeight, view.height);
+      y = view.y;
+      if (view.height > maxHeight || d.growthEvents > WARMUP_MAX_GROWTHS) {
+        d.stopReason = "growth-budget"; break;
+      }
+      if (Math.abs(y - maxY) <= 0.5) {
+        if (view.height <= beforeHeight + 0.5) {
+          d.completed = true; d.stopReason = "bottom-stable"; break;
+        }
+      }
+    }
+    if (!d.stopReason) d.stopReason = d.steps >= WARMUP_MAX_STEPS ? "step-budget" : "time-budget";
+  } catch (error) {
+    warmupError = error;
+    // Warmup is discovery, not capture truth. A page that never settles during
+    // pre-scroll may still be capturable frame-by-frame. Environment/target and
+    // cancellation errors remain fatal.
+    if (s.cancelled || ["TARGET_TAB_CHANGED", "TARGET_TAB_CLOSED", "TARGET_TAB_NAVIGATED",
+        "CAPTURE_ENV_CHANGED", "TARGET_UNRESOLVABLE"].includes(error.reasonCode)) {
+      s.warming = false;
+      throw error;
+    }
+    d.stopReason = error.reasonCode === "FRAME_NOT_SETTLED" ? "settle-budget" : "warmup-recoverable-error";
+  }
+  let top;
+  try {
+    // Keep warmup validation rules until we are back at the start. The caller
+    // then adopts this fresh top-of-target view as the formal capture baseline.
+    top = await scroll(s, 0, 0);
+  } finally {
+    s.warming = false;
+  }
+  d.finalHeight = top.height;
+  d.maxObservedHeight = Math.max(d.maxObservedHeight, top.height);
+  d.durationMs = Date.now() - started;
+  if (warmupError) d.lastErrorReason = warmupError.reasonCode || "WARMUP_RECOVERABLE";
+  return top;
 }
 
 function recoveryBacktrackCSS(height) {
@@ -307,6 +381,8 @@ function recordVisual(s, match, retry) {
   if (match.continuity === "probable") d.probablePlacements++;
   if (match.fallbackMethod === "geometry") d.geometryFallbacks++;
   if (match.fallbackMethod === "probable-visual") d.probableVisualCorrections++;
+  if (match.failureReason === "insufficient-quality") d.insufficientQualityRejects++;
+  if (["width-mismatch", "insufficient-overlap"].includes(match.failureReason)) d.structuralVisualRejects++;
   if (retry) d.visualRecoveryRetries++;
   if (match.result === 'matched') {
     if (match.path === 'fast' && !retry) d.visualFastPath++;
@@ -323,6 +399,7 @@ async function captureFull(s, view, dataUrl) {
   s.full.visual ||= { continuityPolicy: s.continuityPolicy, strictCoverageChecks: 0, strictCoverageFailures: 0, visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
     visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
     probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0,
+    insufficientQualityRejects: 0, structuralVisualRejects: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
   while (true) {
@@ -442,6 +519,7 @@ async function run(s) {
         reasonCode: "CAPTURE_ENV_UNSUPPORTED", diagnostics: { environment: { baseline: s.environment, actual: s.environment } }
       });
     }
+    if (s.mode === "full") s.viewport = { ...s.viewport, ...(await warmupFull(s, s.viewport)) };
     for (let attempt = 0; attempt < 2; attempt++) {
       s.attempt = attempt + 1;
       try {

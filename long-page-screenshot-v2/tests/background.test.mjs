@@ -84,6 +84,39 @@ test('rigid translation maps actual scroll coverage into the original canvas coo
   assert.equal(tile.y - normalized.y, (tile.y + 180) - actual.y);
 });
 
+
+test('Full Page warmup pre-scrolls bounded growth, returns to top, and records diagnostics', async () => {
+  const warmupSource = source.slice(source.indexOf('const WARMUP_MAX_STEPS'), source.indexOf('function recoveryBacktrackCSS'));
+  const moves = [];
+  let grew = false;
+  const context = {
+    Date,
+    check: () => {},
+    scroll: async (s, x, y) => {
+      moves.push(y);
+      let height = grew ? 2500 : 2100;
+      const clientHeight = 700;
+      const maxY = height - clientHeight;
+      const actualY = Math.min(maxY, y);
+      if (!grew && actualY >= maxY) { grew = true; height = 2500; }
+      return { x: 0, y: Math.min(height - clientHeight, y), width: 900, height, innerWidth: 900, innerHeight: 700,
+        clientWidth: 900, clientHeight, dpr: 1, visualScale: 1 };
+    }
+  };
+  vm.runInNewContext(warmupSource, context);
+  const s = { mode: 'full', cancelled: false };
+  const top = await context.warmupFull(s, { x: 0, y: 0, width: 900, height: 2100, innerWidth: 900, innerHeight: 700,
+    clientWidth: 900, clientHeight: 700, dpr: 1, visualScale: 1 });
+  assert.equal(top.y, 0);
+  assert.equal(s.warming, false);
+  assert.equal(s.warmup.completed, true);
+  assert.equal(s.warmup.stopReason, 'bottom-stable');
+  assert.equal(s.warmup.growthEvents, 1);
+  assert.equal(s.warmup.maxObservedHeight, 2500);
+  assert.ok(s.warmup.steps >= 3);
+  assert.equal(moves.at(-1), 0);
+});
+
 test('Full Page absorbs advisory pending-witness FRAME_MOVED and maximizes retained recovery context', async () => {
   const helperSource = source.slice(source.indexOf('function recoveryBacktrackCSS'), source.indexOf('async function capture(s, view)'));
   let calls = 0;

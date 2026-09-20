@@ -46,15 +46,15 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
   const informative = [];
   const base = { policy, expectedOffset, matchedOffset: null, correction: null,
     candidateOffset: null, candidateCorrection: null, searchRadius: radius,
-    overlapHeight: previous.height - expectedOffset, informativeTiles: 0, agreeingTiles: 0,
-    agreementRatio: 0, bestScore: 0, secondBestScore: 0, confidence: 0 };
-  if (width !== current.width) return { ...base, result: 'failed' };
+    overlapHeight: previous.height - expectedOffset, informativeTiles: 0, qualityTiles: 0, agreeingTiles: 0,
+    agreementRatio: 0, qualityRatio: 0, bestScore: 0, secondBestScore: 0, confidence: 0, failureReason: null };
+  if (width !== current.width) return { ...base, result: 'failed', failureReason: 'width-mismatch' };
   const low = Math.max(1, Math.round(expectedOffset) - radius);
   const high = Math.min(previous.height - 32, Math.round(expectedOffset) + radius);
   // The same rows participate in every candidate; changing overlap size must not
   // favor an offset just because it compares fewer pixels.
   const start = Math.max(previous.start, high + current.start), end = Math.min(previous.height, low + current.start + current.data.length / width);
-  if (end - start < 24) return { ...base, result: 'failed' };
+  if (end - start < 24) return { ...base, result: 'failed', failureReason: 'insufficient-overlap' };
   const step = Math.max(1, Math.ceil((end - start) / (fast ? 24 : VISUAL.rows)));
   const votes = [], scores = [];
   let qualityTiles = 0;
@@ -101,7 +101,9 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
       votes.push({ tile, ...best, second: second.error });
     }
   }
-  if (base.informativeTiles < VISUAL.minTiles) return { ...base, result: 'low-information' };
+  base.qualityTiles = qualityTiles;
+  base.qualityRatio = base.informativeTiles ? qualityTiles / base.informativeTiles : 0;
+  if (base.informativeTiles < VISUAL.minTiles) return { ...base, result: 'low-information', failureReason: 'low-information' };
   let agreeing = [];
   for (const vote of votes) {
     const group = votes.filter(other => other.offset === vote.offset);
@@ -118,7 +120,10 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
     base.bestScore = 1 / (1 + summary.reduce((sum, vote) => sum + vote.error, 0) / summary.length);
     base.secondBestScore = 1 / (1 + summary.reduce((sum, vote) => sum + vote.second, 0) / summary.length);
   }
-  if (agreeing.length < VISUAL.minTiles || base.agreementRatio < VISUAL.agreement) return { ...base, result: qualityTiles >= VISUAL.minTiles ? 'ambiguous' : 'failed' };
+  if (agreeing.length < VISUAL.minTiles || base.agreementRatio < VISUAL.agreement) {
+    const result = qualityTiles >= VISUAL.minTiles ? 'ambiguous' : 'failed';
+    return { ...base, result, failureReason: result === 'ambiguous' ? 'insufficient-consensus' : 'insufficient-quality' };
+  }
   base.matchedOffset = agreeing[0].offset;
   base.correction = base.matchedOffset - expectedOffset;
   base.confidence = base.agreementRatio * Math.max(0, base.bestScore);
@@ -131,7 +136,7 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
       base.zones[name] = { informativeTiles, agreeingTiles, agreementRatio,
         pass: !informativeTiles || agreementRatio >= 2 / 3 };
     }
-    if (Object.values(base.zones).some(zone => !zone.pass)) return { ...base, result: 'strict-coverage-failed' };
+    if (Object.values(base.zones).some(zone => !zone.pass)) return { ...base, result: 'strict-coverage-failed', failureReason: 'strict-zone' };
   }
   return { ...base, result: 'matched' };
 }

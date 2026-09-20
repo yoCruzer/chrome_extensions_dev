@@ -306,3 +306,14 @@ Due to execution/token budget, full regression matrix was intentionally NOT run.
 - 不修改 Region，现有 policy/Region targeted smoke 应保持原语义。
 
 本阶段不要求完整回归；先跑 `visual.test.mjs`、`VISUAL_ONLY` 及必要的 policy smoke。真实 GitHub/CSDN 仍由用户在分支版本上验收。
+
+## Completion-First Reset Phase 1.1 targeted plan — 2026-09-20
+
+新增 bounded warmup 和 visual evidence diagnostics，不改变 Region/Multi-part。
+
+最小验证：
+
+- background 单元：2100→2500 的一次 warmup growth，最终 bottom stable 并回到 top；
+- matcher 原测试继续通过，并检查 trace 可区分 `qualityTiles` 与 `failureReason`；
+- 用户真实 GitHub repo tree / GitHub markdown / CSDN 复测：优先观察 warmup.stopReason、growthEvents、visual.insufficientQualityRejects、trace.failureReason；
+- 不把 `failed/insufficient-quality` 直接改成 Robust geometry fallback，先用真实诊断判断是否属于“证据不足”还是“全局视觉矛盾”。

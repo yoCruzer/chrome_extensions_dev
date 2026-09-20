@@ -206,7 +206,7 @@
       ? "已截图内容发生变化，需要重新截图。" : messages[status.state] || "截图处理中。",
       reasonCode: /^[A-Z_]{1,64}$/.test(status.reasonCode || "") ? status.reasonCode : null,
       attempt: status.attempt || 1, metrics: numeric(status.metrics),
-      diagnostics: { ...numeric(diagnostics), fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
+      diagnostics: { ...numeric(diagnostics), warmup: numeric(diagnostics.warmup), fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
     }, null, 2);
   }
 
