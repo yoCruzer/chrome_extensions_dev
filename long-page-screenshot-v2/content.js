@@ -206,7 +206,8 @@
       ? "已截图内容发生变化，需要重新截图。" : messages[status.state] || "截图处理中。",
       reasonCode: /^[A-Z_]{1,64}$/.test(status.reasonCode || "") ? status.reasonCode : null,
       attempt: status.attempt || 1, metrics: numeric(status.metrics),
-      diagnostics: { ...numeric(diagnostics), warmup: numeric(diagnostics.warmup), fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
+      diagnostics: { ...numeric(diagnostics), warmup: numeric(diagnostics.warmup),
+        region: numeric(diagnostics.regionDiagnostics), fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
     }, null, 2);
   }
 
@@ -335,11 +336,33 @@
     proofTrace(s, "frame-committed");
   }
 
+  function regionForCapture(s) {
+    if (!s.frozenRegion) return resolveRegion(s);
+    if (!s.anchors?.first || !s.anchors?.second) return s.runtimeRegion || s.frozenRegion;
+    try {
+      const resolved = resolveRegion(s);
+      const dx = resolved.x - s.frozenRegion.x, dy = resolved.y - s.frozenRegion.y;
+      const shapeChanged = Math.abs(resolved.width - s.frozenRegion.width) > 0.5 ||
+        Math.abs(resolved.height - s.frozenRegion.height) > 0.5;
+      if (shapeChanged) s.regionDiagnostics.shapeChanges++;
+      s.runtimeRegion = { x: s.frozenRegion.x + dx, y: s.frozenRegion.y + dy,
+        width: s.frozenRegion.width, height: s.frozenRegion.height };
+      s.regionDiagnostics.anchorResolutions++;
+      return s.runtimeRegion;
+    } catch (error) {
+      if (!["ANCHOR_UNRESOLVABLE", "REGION_INVALID"].includes(error.reasonCode)) throw error;
+      s.regionDiagnostics.anchorFallbacks++;
+      s.regionDiagnostics.lastAnchorReason = error.reasonCode;
+      return s.runtimeRegion || s.frozenRegion;
+    }
+  }
+
   function regionView(s) {
     fullProof(s);
-    const view = targetView(s), region = resolveRegion(s);
+    const view = targetView(s), region = regionForCapture(s);
     if (!region) return view;
-    return { ...view, region, anchors: s.anchorDiagnostics };
+    return { ...view, region, anchors: s.anchorDiagnostics,
+      regionDiagnostics: { ...s.regionDiagnostics } };
   }
 
   function requireSession(id) {
@@ -474,7 +497,7 @@
     const move = () => {
       const s = requireSession(id);
       const view = targetView(s);
-      const r = relative ? resolveRegion(s) : null;
+      const r = relative ? regionForCapture(s) : null;
       const element = s.target?.element;
       (element || window).scrollTo({ left: x + (r?.x || 0) - (element ? view.x - element.scrollLeft : 0),
         top: y + (r?.y || 0) - (element ? view.y - element.scrollTop : 0), behavior: "instant" });
@@ -613,6 +636,14 @@
         return targetView(s);
       }
       if (m.type === "FULL_COMMIT") { commitFullProof(s, m.rect); return {}; }
+      if (m.type === "REGION_FREEZE") {
+        if (!m.region || ![m.region.x, m.region.y, m.region.width, m.region.height].every(Number.isFinite) ||
+            m.region.width <= 0 || m.region.height <= 0) throw Object.assign(new Error("选区冻结失败。"), { reasonCode: "REGION_INVALID" });
+        s.frozenRegion = { ...m.region };
+        s.runtimeRegion = { ...m.region };
+        s.regionDiagnostics = { anchorResolutions: 0, anchorFallbacks: 0, shapeChanges: 0 };
+        return { region: s.runtimeRegion };
+      }
       if (m.type === "MEASURE" && m.watch) fullProof(s, true);
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y, m.relative);
       if (m.type === "BOTTOM") {

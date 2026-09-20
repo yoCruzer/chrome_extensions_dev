@@ -109,7 +109,6 @@ async function handle(m) {
   }
   if (m.type === "FULL_FRAME") {
     if (m.firstColumn && !session.previous && Math.abs(m.view.y) > 0.01) throw new Error("页面未到达顶部，已停止以免遗漏内容。");
-    if (m.view.x > m.x + 0.01 || m.view.x + m.view.clientWidth <= m.x) throw new Error("页面未到达所需横向位置，已停止以免遗漏内容。");
     const bitmap = await decode(m.dataUrl);
     try {
       if (bitmap.width !== session.bitmapWidth || bitmap.height !== session.bitmapHeight) throw new Error("截图尺寸已变化，请保持窗口和缩放不变。");
@@ -141,7 +140,7 @@ async function handle(m) {
       const end = canonicalY + localBottom;
       if (end <= novelTop || canonicalY > novelTop + 0.01) return { accepted: false, visual: { ...visual, result: 'failed' } };
       if (end > session.region.height) resizeCanvas(end);
-      const rect = { x: m.x, right: Math.min(session.region.width, m.view.x + m.view.clientWidth), y: novelTop, bottom: end };
+      const rect = { x: session.region.x, right: session.region.x + session.region.width, y: novelTop, bottom: end };
       const d = drawGeometry(session.region, { ...m.view, y: canonicalY }, rect, session.scale, 0);
       session.context.drawImage(bitmap, d.sx, d.sy, d.sw, d.sh, d.dx, d.dy, d.dw, d.dh);
       if (m.firstColumn) session.previous = { strip: strip(bitmap, m.view, true), canonicalY, end, documentY: m.view.y };

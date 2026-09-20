@@ -57,6 +57,7 @@ test('Region tolerates unrelated document dimensions but rejects only actual env
   const s = { mode: 'region', tab:{id:1}, environment:{...page,tabId:1,tabZoom:1}, viewport: page, region, scope: 'stable-content' };
   const moved = { ...page, width: 1400, height: 9000, region: { ...region, y: 220 }, scope: s.scope };
   assert.doesNotThrow(() => validationContext.validateView(s, moved));
+  assert.doesNotThrow(() => validationContext.validateView(s, { ...moved, region: { ...moved.region, width: region.width + 0.4, height: region.height - 0.4 } }));
   assert.doesNotThrow(() => validationContext.validateView(s, { ...moved, dpr: 2, clientWidth:880, clientHeight:680 }));
   assert.doesNotThrow(() => validationContext.validateView(s, { ...moved, scope: 'replaced-content' }));
   for (const field of ['innerWidth','innerHeight','tabZoom','visualScale','tabId']) {
@@ -67,8 +68,8 @@ test('Region tolerates unrelated document dimensions but rejects only actual env
       return true;
     });
   }
-  assert.throws(() => validationContext.validateView(s, { ...moved, region: { ...region, height: 2500 } }), /所选区域持续发生布局变化/);
-  assert.throws(() => validationContext.validateView({ ...s, mode: 'full' }, moved), /页面宽度/);
+  assert.throws(() => validationContext.validateView(s, { ...moved, region: { ...region, height: 2500 } }), /所选区域尺寸发生明显变化/);
+  assert.doesNotThrow(() => validationContext.validateView({ ...s, mode: 'full' }, moved));
 });
 
 test('rigid translation maps actual scroll coverage into the original canvas coordinates', () => {
@@ -93,19 +94,20 @@ test('Full Page warmup pre-scrolls bounded growth, returns to top, and records d
     Date,
     check: () => {},
     scroll: async (s, x, y) => {
-      moves.push(y);
+      moves.push({ x, y });
+      assert.equal(x, 73);
       let height = grew ? 2500 : 2100;
       const clientHeight = 700;
       const maxY = height - clientHeight;
       const actualY = Math.min(maxY, y);
       if (!grew && actualY >= maxY) { grew = true; height = 2500; }
-      return { x: 0, y: Math.min(height - clientHeight, y), width: 900, height, innerWidth: 900, innerHeight: 700,
+      return { x: 73, y: Math.min(height - clientHeight, y), width: 900, height, innerWidth: 900, innerHeight: 700,
         clientWidth: 900, clientHeight, dpr: 1, visualScale: 1 };
     }
   };
   vm.runInNewContext(warmupSource, context);
   const s = { mode: 'full', cancelled: false };
-  const top = await context.warmupFull(s, { x: 0, y: 0, width: 900, height: 2100, innerWidth: 900, innerHeight: 700,
+  const top = await context.warmupFull(s, { x: 73, y: 0, width: 900, height: 2100, innerWidth: 900, innerHeight: 700,
     clientWidth: 900, clientHeight: 700, dpr: 1, visualScale: 1 });
   assert.equal(top.y, 0);
   assert.equal(s.warming, false);
@@ -114,7 +116,9 @@ test('Full Page warmup pre-scrolls bounded growth, returns to top, and records d
   assert.equal(s.warmup.growthEvents, 1);
   assert.equal(s.warmup.maxObservedHeight, 2500);
   assert.ok(s.warmup.steps >= 3);
-  assert.equal(moves.at(-1), 0);
+  assert.equal(moves.at(-1).y, 0);
+  assert.ok(moves.every(move => move.x === 73));
+  assert.equal(s.warmup.captureX, 73);
 });
 
 test('Full Page absorbs advisory pending-witness FRAME_MOVED and maximizes retained recovery context', async () => {
@@ -140,30 +144,30 @@ test('Full Page absorbs advisory pending-witness FRAME_MOVED and maximizes retai
     error => error.reasonCode === 'FRAME_MOVED' && error.translation);
 });
 
-test('horizontal columns use the successfully repositioned visual band after recovery', async () => {
+test('Full Page is vertical-only and preserves the current horizontal slice through recovery', async () => {
   const moves = [], frames = [];
-  const view = { x: 0, y: 0, width: 1600, height: 1000, clientWidth: 800, clientHeight: 600 };
-  const s = { full: { end: 1000 }, region: { width: 1600 }, metrics: { captures: 1 }, frames: 0 };
+  const view = { x: 123, y: 0, width: 1600, height: 1000, clientWidth: 800, clientHeight: 600 };
+  const s = { full: { end: 1000 }, region: { x: 123, y: 0, width: 800, height: 1000 },
+    metrics: { captures: 1 }, frames: 0, continuityPolicy: 'robust' };
   let rejects = 0;
   const context = { VISUAL, overlapCSS, bottomTail, MAX_STEPS, bottomQuiescence: async () => true,
-    scroll: async (s, x, y) => { const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current; },
+    scrollFullRecoverable: async (s, x, y) => {
+      assert.equal(x, 123); const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current;
+    },
     extendEnd: async () => {}, capture: async (s, view) => { s.metrics.captures++; return { view, dataUrl: 'data:' }; },
     status: async () => {}, request: async (s, target, type, m) => {
       if (type !== 'FULL_FRAME') return {};
-      if (m.firstColumn && s.frames >= 2 && rejects < 2) {
-        rejects++; return { accepted: false, visual: { result: 'low-information' } };
-      }
-      frames.push(m);
-      return { accepted: true, canonicalY: m.view.y, novelTop: s.frames < 2 ? 0 : 600,
-        end: Math.min(1000, m.view.y + 600), right: m.x + 800 };
+      assert.equal(m.x, 123); assert.equal(m.firstColumn, true); frames.push(m);
+      if (s.frames >= 1 && rejects < 2) { rejects++; return { accepted: false, visual: { result: 'low-information' } }; }
+      return { accepted: true, canonicalY: m.view.y, novelTop: s.frames ? 600 : 0,
+        end: Math.min(1000, m.view.y + 600), right: 923 };
     } };
   vm.runInNewContext(source.slice(source.indexOf('function recordVisual'), source.indexOf('async function saveImage')), context);
   await context.captureFull(s, view, 'data:');
   assert.equal(rejects, 2);
-  const recovered = frames.findIndex(m => m.firstColumn && m.view.y === 184);
-  assert.ok(recovered > 0);
-  assert.equal(frames[recovered + 1].view.y, 184);
-  assert.equal(frames[recovered + 1].x, 800);
+  assert.ok(frames.every(m => m.x === 123 && m.firstColumn));
+  assert.ok(moves.every(m => m.x === 123));
+  assert.equal(s.frames, 3);
   assert.equal(s.full.visual.visualFailures, 0);
 });
 

@@ -317,3 +317,29 @@ Due to execution/token budget, full regression matrix was intentionally NOT run.
 - matcher 原测试继续通过，并检查 trace 可区分 `qualityTiles` 与 `failureReason`；
 - 用户真实 GitHub repo tree / GitHub markdown / CSDN 复测：优先观察 warmup.stopReason、growthEvents、visual.insufficientQualityRejects、trace.failureReason；
 - 不把 `failed/insufficient-quality` 直接改成 Robust geometry fallback，先用真实诊断判断是否属于“证据不足”还是“全局视觉矛盾”。
+
+## Completion-First Reset Phase 2 targeted plan — 2026-09-20
+
+Phase 2A 冻结 Full Page 为 vertical-only viewport slice；Phase 2B 将 Region anchors 从持续 veto 改为 freeze/rebase evidence。
+
+定向验证重点：
+
+- Full Page 起始 window.scrollX 非 0、document width 大于 viewport：所有正式滚动请求保持同一 x，PNG 宽度只等于 clientWidth，结束后恢复原 scrollX；
+- reported scrollWidth 变化不再触发 FULL_WIDTH_CHANGED；
+- offscreen FULL_FRAME 不再存在横向 reachability veto；
+- Region 0.5px 以内尺寸 jitter 不失败；
+- Region 帧间 rigid translation 直接 rebase；
+- anchor 临时失效使用 frozen/runtime Scope，而不是立即 ANCHOR_UNRESOLVABLE；
+- target resize、zoom/tab/window 环境变化仍 fail/restart；
+- 不运行 Multi-part，本阶段仍保持单 PNG 输出预算。
+
+### Phase 2 regression-semantics amendment
+
+Phase 2 intentionally supersedes older Region expectations in the historical sections above:
+
+- post-freeze anchor loss is advisory fallback, not automatic `ANCHOR_UNRESOLVABLE`;
+- post-freeze anchor separation/shape growth does not resize output or force Attempt 2;
+- bitmap-time rigid translation uses rebase diagnostics instead of mandatory frame discard;
+- Full Page no longer has horizontal columns; old multi-column recovery assertions are historical only.
+
+Deterministic tests must evaluate the frozen visual Scope, not require the final page's semantic content extent to be reconstructed after mid-capture mutations.

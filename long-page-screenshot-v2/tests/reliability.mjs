@@ -68,9 +68,13 @@ export async function testReliability({ page, worker, waitFor, capture, PNG, kin
   if(kind==='chat') return;
   await page.reload();await select(true,true);await start();await waitFor(s=>s.state==='capturing');
   await page.evaluate(()=>growArticle());
-  const grown=await waitFor(s=>!s.busy);await verify(grown,2709,true);
-  assert.equal(grown.attempt,2);assert.equal(grown.metrics.retries,1);
-  console.log('PASS csdn coherent container resize: Attempt 2 adopts 300px growth, all markers and padding verified');
+  const grown=await waitFor(s=>!s.busy);
+  assert.equal(grown.state,'complete',JSON.stringify(grown));
+  const grownPNG=PNG.sync.read(await readFile(grown.result.filename));
+  assert.equal(grownPNG.width,499);assert.equal(grownPNG.height,2409);
+  assert.equal(grown.attempt,1);assert.equal(grown.metrics.retries,0);
+  assert.ok(grown.diagnostics.regionDiagnostics.shapeChanges > 0, JSON.stringify(grown.diagnostics));
+  console.log('PASS csdn in-scope growth: frozen visual Scope completes without expanding output');
   for(const change of ['innerWidth','tabZoom','visualScale']) {
     await page.reload();await select();await start();await waitFor(s=>s.state==='capturing');
     if(change==='innerWidth') await page.setViewportSize({width:880,height:700});

@@ -45,6 +45,7 @@ async function request(s, target, type, payload = {}) {
     : await chrome.runtime.sendMessage(message);
   check(s);
   if (response?.fullProof) s.fullProofDiagnostics = response.fullProof;
+  if (response?.regionDiagnostics) s.diagnostics = { ...s.diagnostics, regionDiagnostics: response.regionDiagnostics };
   if (!response?.ok) throw Object.assign(new Error(response?.error || "截图组件未响应。"), { layout: !!response?.layout, translation: !!response?.translation, reasonCode: response?.reasonCode, diagnostics: response?.diagnostics });
   if (s.mode === "region" && s.environment && target === "content" && ["MEASURE", "SCROLL"].includes(type)) {
     response.tabZoom = await chrome.tabs.getZoom(s.tab.id);
@@ -111,6 +112,9 @@ async function ensureVisible(s) {
   }
 }
 
+const REGION_EPSILON = 0.5;
+const near = (a, b, epsilon = REGION_EPSILON) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= epsilon;
+
 function validateView(s, view) {
   if (s.mode === "full" && s.warming) {
     if (["innerWidth", "innerHeight", "dpr", "visualScale"].some(key => view[key] !== s.viewport[key]) || view.visualScale !== 1) {
@@ -132,15 +136,14 @@ function validateView(s, view) {
     if (["innerWidth", "innerHeight", "dpr", "visualScale"].some(key => view[key] !== s.viewport[key])) {
       throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
     }
-    if (view.clientWidth !== s.viewport.clientWidth || view.clientHeight !== s.viewport.clientHeight || view.width !== s.viewport.width) {
-      throw Object.assign(new Error("滚动容器尺寸发生变化，正在重新截图。"), { layout: true, reasonCode: "TARGET_RESIZED" });
+    if (view.clientWidth !== s.viewport.clientWidth || view.clientHeight !== s.viewport.clientHeight) {
+      throw Object.assign(new Error("滚动容器可见区域尺寸发生变化，正在重新截图。"), { layout: true, reasonCode: "TARGET_RESIZED" });
     }
     return;
   }
   if (!sameViewport(s.viewport, view) || view.visualScale !== 1) throw new Error("视口或缩放已改变，请保持窗口尺寸与缩放不变。");
-  if (view.width !== s.viewport.width) throw Object.assign(new Error("页面宽度发生变化，请等待页面稳定后重试。"), {
-    layout: !s.frames, reasonCode: "FULL_WIDTH_CHANGED"
-  });
+  // Full Page is vertical-only. document/target scrollWidth is diagnostic only;
+  // it no longer defines capture Scope or invalidates a vertical capture.
 }
 
 function validateEnvironment(s, actual) {
@@ -158,9 +161,9 @@ function validateEnvironment(s, actual) {
 
 function validateRegion(s, page) {
   s.diagnostics = { ...s.diagnostics, anchors: page.anchors, region: { before: s.region, current: page.region } };
-  if (s.region && page.region && (Math.abs(page.region.width - s.region.width) > 0.01 ||
-      Math.abs(page.region.height - s.region.height) > 0.01)) {
-    throw Object.assign(new Error("所选区域持续发生布局变化，请稍后重试。"), {
+  if (s.region && page.region && (!near(page.region.width, s.region.width) ||
+      !near(page.region.height, s.region.height))) {
+    throw Object.assign(new Error("所选区域尺寸发生明显变化，正在重新建立截图基线。"), {
       layout: true, reasonCode: "REGION_REFLOW", diagnostics: s.diagnostics
     });
   }
@@ -194,13 +197,16 @@ const WARMUP_MAX_GROWTHS = 6;
 
 async function warmupFull(s, initialView) {
   const started = Date.now();
+  const captureX = initialView.x;
+  s.fullCaptureX = captureX;
   const d = s.warmup = { steps: 0, growthEvents: 0, initialHeight: initialView.height,
     maxObservedHeight: initialView.height, finalHeight: initialView.height,
+    captureX, visibleWidth: initialView.clientWidth, reportedWidth: initialView.width,
     completed: false, stopReason: null, durationMs: 0 };
   let view = initialView, warmupError;
   s.warming = true;
   try {
-    view = await scroll(s, 0, 0);
+    view = await scroll(s, captureX, 0);
     d.initialHeight = view.height;
     d.maxObservedHeight = view.height;
     let y = view.y;
@@ -211,7 +217,7 @@ async function warmupFull(s, initialView) {
       if (maxY <= 0.5) { d.completed = true; d.stopReason = "single-viewport"; break; }
       const nextY = Math.min(maxY, y + Math.max(320, Math.floor(view.clientHeight * 0.9)));
       const beforeHeight = view.height;
-      view = await scroll(s, 0, nextY);
+      view = await scroll(s, captureX, nextY);
       d.steps++;
       if (view.height > d.maxObservedHeight + 0.5) d.growthEvents++;
       d.maxObservedHeight = Math.max(d.maxObservedHeight, view.height);
@@ -242,10 +248,14 @@ async function warmupFull(s, initialView) {
   try {
     // Keep warmup validation rules until we are back at the start. The caller
     // then adopts this fresh top-of-target view as the formal capture baseline.
-    top = await scroll(s, 0, 0);
+    top = await scroll(s, captureX, 0);
   } finally {
     s.warming = false;
   }
+  s.fullCaptureX = top.x;
+  d.captureX = top.x;
+  d.visibleWidth = top.clientWidth;
+  d.reportedWidth = top.width;
   d.finalHeight = top.height;
   d.maxObservedHeight = Math.max(d.maxObservedHeight, top.height);
   d.durationMs = Date.now() - started;
@@ -285,7 +295,8 @@ async function capture(s, view) {
         ? await scrollFullRecoverable(s, target.x, target.y)
         : await scroll(s, target.x, target.y);
       if (s.mode === "full" && !s.frames) {
-        s.region = { x: 0, y: 0, width: view.width, height: view.height };
+        s.fullCaptureX = view.x;
+        s.region = { x: view.x, y: 0, width: view.clientWidth, height: view.height };
         s.full.end = view.height;
         s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
       }
@@ -308,11 +319,16 @@ async function captureOnce(s, view) {
         throw Object.assign(new Error("当前帧位置变化，正在重新采样。"), { translation: true });
       }
     }
+    let regionBefore;
     if (s.mode === "region") {
-      const before = await request(s, "content", "MEASURE");
-      validateView(s, before);
-      if (before.x !== view.x || before.y !== view.y || before.region.x !== view.region.x || before.region.y !== view.region.y || before.viewportRect?.left !== view.viewportRect?.left || before.viewportRect?.top !== view.viewportRect?.top) {
-        throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true, reasonCode: "FRAME_MOVED" });
+      regionBefore = await request(s, "content", "MEASURE");
+      validateView(s, regionBefore);
+      const rebased = !near(regionBefore.region.x, view.region.x) || !near(regionBefore.region.y, view.region.y) ||
+        !near(regionBefore.viewportRect?.left || 0, view.viewportRect?.left || 0) ||
+        !near(regionBefore.viewportRect?.top || 0, view.viewportRect?.top || 0);
+      if (rebased) {
+        s.diagnostics = { ...s.diagnostics, regionRebases: (s.diagnostics?.regionRebases || 0) + 1 };
+        Object.assign(view, regionBefore);
       }
     }
     lastCapture = Date.now();
@@ -325,11 +341,22 @@ async function captureOnce(s, view) {
       s.captureExtentStable = fullBefore.height === view.height && after.height === view.height;
       await extendEnd(s, after);
     }
-    if (s.mode === "region" && (after.region.x !== view.region.x || after.region.y !== view.region.y || after.viewportRect?.left !== view.viewportRect?.left || after.viewportRect?.top !== view.viewportRect?.top)) {
-      throw Object.assign(new Error("所选内容移动过于频繁，请稍后重试。"), { translation: true });
+    if (s.mode === "region") {
+      const scrollMovedDuringCapture = regionBefore && (!near(after.x, regionBefore.x) || !near(after.y, regionBefore.y));
+      if (scrollMovedDuringCapture) {
+        throw Object.assign(new Error("截图时滚动位置发生变化，请重试。"), { reasonCode: "FRAME_MOVED" });
+      }
+      const translatedDuringCapture = regionBefore && (!near(after.region.x, regionBefore.region.x) ||
+        !near(after.region.y, regionBefore.region.y) ||
+        !near(after.viewportRect?.left || 0, regionBefore.viewportRect?.left || 0) ||
+        !near(after.viewportRect?.top || 0, regionBefore.viewportRect?.top || 0));
+      if (translatedDuringCapture) {
+        s.diagnostics = { ...s.diagnostics, regionCaptureRebases: (s.diagnostics?.regionCaptureRebases || 0) + 1 };
+        Object.assign(view, after);
+      }
     }
-    if (after.x !== view.x || after.y !== view.y || after.viewportRect?.left !== view.viewportRect?.left || after.viewportRect?.top !== view.viewportRect?.top) {
-      throw Object.assign(new Error("截图时页面发生移动，请重试。"), { translation: s.mode === "full" });
+    if (s.mode === "full" && (!near(after.x, view.x) || !near(after.y, view.y))) {
+      throw Object.assign(new Error("截图时滚动位置发生变化，请重试。"), { translation: true, reasonCode: "FRAME_MOVED" });
     }
     return dataUrl;
   } finally {
@@ -402,32 +429,28 @@ async function captureFull(s, view, dataUrl) {
     insufficientQualityRejects: 0, structuralVisualRejects: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
+  const x = s.region.x;
   while (true) {
     if (documentBottom >= s.full.end - 0.01 && await bottomQuiescence(s)) break;
-    let x = 0, band;
-    while (x < s.region.width - 0.01) {
-      for (let retry = 0; retry < 3; retry++) {
-        if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
-        if (!dataUrl) {
-          // Retry once at the same position for transient paint. The final
-          // retry backs up by the extra rows already retained by the matcher,
-          // maximizing shared context without increasing memory or relaxing
-          // any visual-confidence threshold.
-          const y = band?.documentY ?? (retry === 2 ? Math.max(0, nextY - recoveryBacktrackCSS(view.clientHeight)) : nextY);
-          view = await scrollFullRecoverable(s, x, y);
-          await extendEnd(s, view);
-          ({ view, dataUrl } = await capture(s, view));
-        }
-        if (band && view.y !== band.documentY) throw Object.assign(new Error("横向截图时页面发生位移，请重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
-        const counters = s.fullProofDiagnostics?.counters;
-        const evidence = (counters?.witnessMoved || 0) + (counters?.witnessResized || 0) + (counters?.witnessRemoved || 0);
-        let result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
-          uncertain: retry > 0 || evidence !== (s.visualEvidence || 0) || view.height !== s.visualHeight,
-          allowRobustFallback: retry === 2 && s.continuityPolicy !== "strict",
-          firstColumn: x === 0, canonicalY: band?.canonicalY, novelTop: band?.novelTop });
-        dataUrl = null;
-        recordVisual(s, result.visual, retry);
-        if (!result.accepted && x === 0 && s.continuityPolicy !== "strict") {
+    for (let retry = 0; retry < 3; retry++) {
+      if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
+      if (!dataUrl) {
+        // Full Page is vertical-only: preserve the initially visible horizontal
+        // slice and change only y. The final retry increases vertical overlap.
+        const y = retry === 2 ? Math.max(0, nextY - recoveryBacktrackCSS(view.clientHeight)) : nextY;
+        view = await scrollFullRecoverable(s, x, y);
+        await extendEnd(s, view);
+        ({ view, dataUrl } = await capture(s, view));
+      }
+      const counters = s.fullProofDiagnostics?.counters;
+      const evidence = (counters?.witnessMoved || 0) + (counters?.witnessResized || 0) + (counters?.witnessRemoved || 0);
+      let result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
+        uncertain: retry > 0 || evidence !== (s.visualEvidence || 0) || view.height !== s.visualHeight,
+        allowRobustFallback: retry === 2 && s.continuityPolicy !== "strict",
+        firstColumn: true });
+      dataUrl = null;
+      recordVisual(s, result.visual, retry);
+      if (!result.accepted && s.continuityPolicy !== "strict") {
           const d = s.full.visual;
           d.bottomTailChecks++;
           d.bottomTailRejected++;
@@ -468,17 +491,14 @@ async function captureFull(s, view, dataUrl) {
             ? "全宽严格模式下无法确认部分区域连续。可等待页面稳定后重试，或改用“智能容错”。"
             : "无法可靠对齐相邻截图，请等待页面稳定后重试。"), { reasonCode: "VISUAL_CONTINUITY_FAILED" });
         }
-        s.visualEvidence = evidence;
-        s.visualHeight = view.height;
-        band ||= { ...result, documentY: view.y };
-        s.frames++;
-        await request(s, "content", "FULL_COMMIT", { rect: { x, y: view.y + result.novelTop - result.canonicalY,
-          right: result.right, bottom: Math.min(view.height, view.y + view.clientHeight) } });
-        x = result.right;
-        documentBottom = Math.min(view.height, view.y + view.clientHeight);
-        await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(documentBottom / s.full.end * 100))}% · ${s.frames} 帧`);
-        break;
-      }
+      s.visualEvidence = evidence;
+      s.visualHeight = view.height;
+      s.frames++;
+      await request(s, "content", "FULL_COMMIT", { rect: { x, y: view.y + result.novelTop - result.canonicalY,
+        right: result.right, bottom: Math.min(view.height, view.y + view.clientHeight) } });
+      documentBottom = Math.min(view.height, view.y + view.clientHeight);
+      await status(s, "capturing", `正在截图 ${Math.min(100, Math.floor(documentBottom / s.full.end * 100))}% · ${s.frames} 帧`);
+      break;
     }
     nextY = documentBottom - overlapCSS(view.clientHeight);
   }
@@ -538,6 +558,7 @@ async function run(s) {
               s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
                 right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
               validateView(s, resolved);
+              await request(s, "content", "REGION_FREEZE", { region: s.region });
               view = await scroll(s, s.region.x, s.region.y);
               outputGeometry(s.region, view, { width: view.innerWidth, height: view.innerHeight }, s.output === "device" ? "auto" : s.output);
               ({ view, dataUrl } = await capture(s, view));
@@ -552,13 +573,15 @@ async function run(s) {
           for (let sample = 0; sample < 3; sample++) {
             try {
               const reset = await request(s, "content", "FULL_RESET", { rebase: sample > 0 });
-              s.viewport = { ...s.viewport, width: reset.width, clientWidth: reset.clientWidth, clientHeight: reset.clientHeight };
-              view = await scroll(s, 0, 0);
-              s.region = { x: 0, y: 0, width: view.width, height: view.height };
+              s.viewport = { ...s.viewport, clientWidth: reset.clientWidth, clientHeight: reset.clientHeight };
+              view = await scroll(s, s.fullCaptureX ?? reset.x, 0);
+              s.fullCaptureX = view.x;
+              s.region = { x: view.x, y: 0, width: view.clientWidth, height: view.height };
               s.full ||= { initialHeight: view.height, maxObservedHeight: view.height, endExtensions: 0, bottomStableSamples: 0 };
               s.full.end = view.height;
               s.full.fullPageRestarts = attempt;
               s.full.targetKind = view.targetKind;
+              s.full.horizontal = { mode: "viewport-slice", x: view.x, visibleWidth: view.clientWidth, reportedWidth: view.width };
               s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
               const estimated = s.output === "device" ? view.dpr : 1;
               outputGeometry(s.region, view, { width: view.innerWidth * estimated, height: view.innerHeight * estimated }, s.output);

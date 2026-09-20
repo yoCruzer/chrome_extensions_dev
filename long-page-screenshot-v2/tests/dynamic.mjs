@@ -15,11 +15,11 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
     await page.mouse.click(579, container ? 509 : 499);
   };
   const start = () => page.mouse.click(811, 245);
-  const verify = async (result, container = false, grown = false) => {
+  const verify = async (result, container = false, grown = false, frozen = false) => {
     assert.equal(result.state, 'complete', JSON.stringify(result));
     assert.equal(result.parts, 1);
     const png = PNG.sync.read(await readFile(result.result.filename));
-    assert.equal(png.width, 499);assert.equal(png.height, (container ? 2409 : 2399) + (grown ? 300 : 0));
+    assert.equal(png.width, 499);assert.equal(png.height, (container ? 2409 : 2399) + (grown && !frozen ? 300 : 0));
     // Compare the entire output to immutable pre-selection canvas pixels,
     // including TOP/CHECKPOINT/BOTTOM text, both edges and every seam row.
     for(let y=0;y<png.height;y++) {
@@ -66,10 +66,17 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
       await page.evaluate(() => growArticle());
     }
     const resized = await waitFor(s => !s.busy);
-    await verify(resized, true, true);
-    assert.equal(resized.metrics.retries, timing === "committed" ? 1 : 0);
+    if (timing === 'committed') {
+      assert.equal(resized.state, 'complete', JSON.stringify(resized));
+      const png = PNG.sync.read(await readFile(resized.result.filename));
+      assert.equal(png.width,499);assert.equal(png.height,2409);
+    } else {
+      await verify(resized, true, true, timing === 'bitmap');
+    }
+    assert.equal(resized.metrics.retries, 0);
+    if (timing !== 'before') assert.ok(resized.diagnostics.regionDiagnostics.shapeChanges > 0, JSON.stringify(resized.diagnostics));
     assert.equal(await worker.evaluate(async () => (await chrome.downloads.search({})).length), downloadsBefore + 1);
-    console.log(`PASS article padding anchor resize ${timing}: new coherent baseline, complete markers and every row`);
+    console.log(`PASS article growth ${timing}: frozen Region Scope completes without resizing output`);
   }
   await reset();await select();
   await page.evaluate(() => changeBanner());
@@ -113,8 +120,9 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
     };
   });
   await start();const resampled=await waitFor(s=>!s.busy);await verify(resampled);
-  assert.equal(resampled.metrics.frameRetries,1);assert.equal(resampled.metrics.retries,0);
-  console.log('PASS translation during bitmap acquisition discards only uncommitted frame');
+  assert.equal(resampled.metrics.frameRetries,0);assert.equal(resampled.metrics.retries,0);
+  assert.ok(resampled.diagnostics.regionCaptureRebases > 0, JSON.stringify(resampled.diagnostics));
+  console.log('PASS translation during bitmap acquisition uses post-capture rebase without discarding the frame');
 
   await reset();await select();await start();await waitFor(s=>s.state==='capturing');
   await page.evaluate(()=>{
@@ -128,16 +136,13 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
   await reset();await select();await start();await waitFor(s=>s.state==='capturing');
   await page.evaluate(()=>document.getElementById('BOTTOM_MARKER').remove());
   const lostDuringCapture=await waitFor(s=>!s.busy);
-  assert.equal(lostDuringCapture.state,'failed');assert.match(lostDuringCapture.message,/锚点已失效/);
-  assert.equal(lostDuringCapture.parts,0);
-  assert.equal(lostDuringCapture.reasonCode,"ANCHOR_UNRESOLVABLE");
-  assert.equal(lostDuringCapture.diagnostics.anchors.second.connected,false);
-  assert.equal(lostDuringCapture.diagnostics.anchors.second.mode,"unresolvable");
-  assert.ok(lostDuringCapture.diagnostics.anchors.second.before);
-  assert.ok(lostDuringCapture.diagnostics.anchors.second.current);
+  assert.equal(lostDuringCapture.state,'complete',JSON.stringify(lostDuringCapture));
+  const lostPNG=PNG.sync.read(await readFile(lostDuringCapture.result.filename));
+  assert.equal(lostPNG.width,499);assert.equal(lostPNG.height,2399);
+  assert.ok(lostDuringCapture.diagnostics.regionDiagnostics.anchorFallbacks > 0, JSON.stringify(lostDuringCapture.diagnostics));
   assert.equal((await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']}))).length,0);
   assert.deepEqual(await page.evaluate(()=>[scrollX,scrollY]),[0,0]);
-  console.log('PASS anchor loss after committed frame fails without PNG and restores');
+  console.log('PASS anchor loss after Scope freeze falls back to last runtime region and completes');
 
   await reset();await select();
   await page.mouse.click(650,150);await page.keyboard.press('Meta+A');await page.keyboard.type('80');
@@ -150,14 +155,15 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
 
   await reset();await select(true);await start();await waitFor(s=>s.state==='capturing');
   await page.evaluate(()=>growArticle());
-  await waitFor(s=>s.attempt===2 && s.frames>0 && s.state==='capturing');
+  await page.waitForTimeout(250);
   await page.evaluate(()=>growArticle());
   const repeated=await waitFor(s=>!s.busy);
-  assert.equal(repeated.state,'failed',JSON.stringify(repeated));
-  assert.equal(repeated.attempt,2);assert.equal(repeated.reasonCode,'REGION_REFLOW');
-  assert.equal(repeated.parts,0);assert.equal(repeated.result,undefined);
-  assert.equal(repeated.metrics.retries,1);
-  console.log('PASS second committed reflow: Attempt 2 fails, no PNG');
+  assert.equal(repeated.state,'complete',JSON.stringify(repeated));
+  const repeatedPNG=PNG.sync.read(await readFile(repeated.result.filename));
+  assert.equal(repeatedPNG.width,499);assert.equal(repeatedPNG.height,2409);
+  assert.equal(repeated.attempt,1);assert.equal(repeated.metrics.retries,0);
+  assert.ok(repeated.diagnostics.regionDiagnostics.shapeChanges > 0, JSON.stringify(repeated.diagnostics));
+  console.log('PASS repeated in-scope reflow: frozen visual Scope stays fixed and capture completes');
 
   await reset();await select();
   await page.evaluate(()=>document.getElementById('TOP_MARKER').remove());
@@ -170,10 +176,13 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
   await page.evaluate(()=>{let n=0;window.scopeTimer=setInterval(()=>{
     document.getElementById('CHECKPOINT_2').style.height=(++n%2?600:480)+'px';
   },150)});
-  const unstable=await waitFor(s=>!s.busy);
-  assert.equal(unstable.state,'failed',JSON.stringify(unstable));assert.match(unstable.message,/所选区域持续发生布局变化/);
-  assert.equal(unstable.parts,0);assert.equal(unstable.metrics.retries,1);
-  console.log('PASS repeated region geometry changes exhaust one retry without output');
+  const unstable=await waitFor(s=>!s.busy);await page.evaluate(()=>clearInterval(window.scopeTimer));
+  assert.equal(unstable.state,'complete',JSON.stringify(unstable));
+  const unstablePNG=PNG.sync.read(await readFile(unstable.result.filename));
+  assert.equal(unstablePNG.width,499);assert.equal(unstablePNG.height,2399);
+  assert.equal(unstable.metrics.retries,0);
+  assert.ok(unstable.diagnostics.regionDiagnostics.shapeChanges > 0, JSON.stringify(unstable.diagnostics));
+  console.log('PASS repeated region geometry changes remain advisory after Scope freeze');
 
   await reset();await select();await start();await waitFor(s=>s.state==='capturing');
   await worker.evaluate(async()=>{const [tab]=await chrome.tabs.query({active:true,currentWindow:true});await chrome.tabs.setZoom(tab.id,1.25)});

@@ -213,7 +213,7 @@ try {
       assert.equal(result.state, "complete", JSON.stringify(result));
       const png = PNG.sync.read(await readFile(result.result.filename));
       const ratio = output === "device" ? Number(process.env.NATIVE_DPR) : 1;
-      assert.equal(png.width, 1500 * ratio); assert.equal(png.height, 1800 * ratio);
+      assert.equal(png.width, 900 * ratio); assert.equal(png.height, 1800 * ratio);
       for (let y = 0; y < png.height; y++) assert.equal(png.data[(y * png.width + 100) * 4 + 2], 97);
       assert.ok(result.diagnostics.visual.visualChecks > 0);
       console.log("PASS native Retina Full Page visual", output, png.width, png.height);
@@ -251,9 +251,9 @@ try {
   let row = 0;
   for (const file of files) {
     const png = PNG.sync.read(await readFile(file.filename));
-    assert.equal(png.width, 1500);
+    assert.equal(png.width, 900);
     for (let y = 0; y < png.height; y++, row++) {
-      for (const x of [0, 800, 1499]) {
+      for (const x of [0, 450, 899]) {
         const offset = (y * png.width + x) * 4;
         assert.deepEqual([...png.data.subarray(offset, offset + 3)], [row % 251, Math.floor(row / 251), 97], `row=${row} x=${x}`);
       }
@@ -261,7 +261,7 @@ try {
   }
   assert.equal(row, 10337);
   assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.getElementById("fixed").style.visibility]), [123, 321, ""]);
-  console.log("PASS full: exact rows across horizontal/vertical tiles in one PNG, bottom and page restoration");
+  console.log("PASS full: current 900px horizontal slice, exact vertical rows, bottom and page restoration");
 
   await capture("region");
   await page.screenshot({ path: join(root, "selection.png") });
