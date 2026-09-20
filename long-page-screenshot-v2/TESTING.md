@@ -343,3 +343,11 @@ Phase 2 intentionally supersedes older Region expectations in the historical sec
 - Full Page no longer has horizontal columns; old multi-column recovery assertions are historical only.
 
 Deterministic tests must evaluate the frozen visual Scope, not require the final page's semantic content extent to be reconstructed after mid-capture mutations.
+
+## Save-name + probable-score targeted plan — 2026-09-20
+
+- 120 个中文字符 + emoji + 路径非法字符：建议 basename 按 UTF-8 bytes 有界且不含路径非法字符；
+- 第一次 downloads.download 抛 `Invalid filename`：自动使用 timestamp-only safe basename 重试，真实保存路径仍来自 DownloadItem.filename；
+- 相邻帧仅有细微确定性像素噪声：strict quality gate 可返回 `insufficient-quality`，但 raw score 多数仍指向同一 offset，Robust 使用 `probable-score`；
+- 完全 unrelated frame：raw offset 不形成高质量多数，仍无 Robust fallback；
+- Strict 永远不使用 probable-score。

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchVertical, robustPlacement } from '../capture/visual.js';
+import { VISUAL, matchVertical, robustPlacement } from '../capture/visual.js';
 function frame(offset, mutate = () => null, pattern = (x, y) => ((Math.imul(y + 17, 7321) ^ Math.imul(x + 19, y + 731)) >>> 0) % 251) {
   const width = 120, height = 700;
   return { width, height, start: 0, data: Float32Array.from({ length: width * height }, (_, i) => {
@@ -100,4 +100,24 @@ test('Robust geometry fallback is limited to non-contradictory ambiguity/low-inf
   assert.equal(robustPlacement({canonicalY:0,end:700},525,repeated,'strict'),null);
   assert.equal(robustPlacement({canonicalY:0,end:700},0,repeated,'robust'),null);
   assert.equal(robustPlacement({canonicalY:0,end:700},700,repeated,'robust'),null);
+});
+
+test('Robust probable-score accepts coherent noisy alignment but still rejects unrelated images', () => {
+  const basePattern=(x,y)=>((Math.imul(y+17,7321)^Math.imul(x+19,y+731))>>>0)%251;
+  const noisyPattern=(x,y)=>basePattern(x,y)+(((x*17+y*13)%3)-1);
+  const noisy=matchVertical(frame(0,undefined,basePattern),frame(525,undefined,noisyPattern),525,false,'robust');
+  assert.equal(noisy.result,'failed');
+  assert.equal(noisy.failureReason,'insufficient-quality');
+  assert.ok(noisy.scoreAgreeingTiles >= VISUAL.minTiles);
+  assert.ok(noisy.scoreAgreementRatio >= VISUAL.agreement);
+  assert.equal(noisy.scoreCandidateOffset,525);
+  const placement=robustPlacement({canonicalY:1000,end:1700},525,noisy,'robust');
+  assert.equal(placement.visual.fallbackMethod,'probable-score');
+  assert.equal(placement.visual.placementOffset,525);
+  assert.equal(placement.visual.continuity,'probable');
+
+  const unrelated=matchVertical(frame(0),frame(1800),525,false,'robust');
+  assert.equal(unrelated.result,'failed');
+  assert.equal(robustPlacement({canonicalY:1000,end:1700},525,unrelated,'robust'),null);
+  assert.equal(robustPlacement({canonicalY:1000,end:1700},525,noisy,'strict'),null);
 });

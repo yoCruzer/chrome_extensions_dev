@@ -171,6 +171,32 @@ test('Full Page is vertical-only and preserves the current horizontal slice thro
   assert.equal(s.full.visual.visualFailures, 0);
 });
 
+
+test('download filename is UTF-8 byte bounded and retries with a timestamp-only safe fallback', async () => {
+  const helperSource=source.slice(source.indexOf('function utf8CodePointBytes'),source.indexOf('async function run'));
+  const attempts=[];
+  const context={
+    chrome:{downloads:{
+      download:async options=>{attempts.push(options.filename);if(attempts.length===1)throw new Error('Invalid filename');return 9},
+      search:async()=>[{id:9,state:'complete',filename:'/chosen/result.png',fileSize:123}]
+    }},
+    status:async()=>{},check:()=>{},delay:async()=>{}
+  };
+  vm.runInNewContext(helperSource,context);
+  const chinese='测'.repeat(120)+'😀😀😀 / : * ? " < > |';
+  const safe=context.suggestedFilename('2026-09-20T00-00-00-000Z',chinese);
+  const basename=safe.split('/').at(-1);
+  let bytes=0;for(const ch of basename)bytes+=context.utf8CodePointBytes(ch);
+  assert.ok(bytes < 220, `basename bytes=${bytes}`);
+  assert.doesNotMatch(safe, /[\\:*?"<>|]/);
+  const s={tab:{title:chinese},stamp:'2026-09-20T00-00-00-000Z',metrics:{filenameFallbacks:0},outputSize:{width:1,height:1},parts:0};
+  await context.saveImage(s,'blob:test');
+  assert.equal(attempts.length,2);
+  assert.match(attempts[1],/LongScreenshot\/2026-09-20T00-00-00-000Z-capture\.png$/);
+  assert.equal(s.metrics.filenameFallbacks,1);
+  assert.equal(s.result.filename,'/chosen/result.png');
+});
+
 test('START validates Full Page policy and omits it for Region', async () => {
  const startSource=source.slice(source.indexOf('async function start('),source.indexOf('async function ensureVisible'));
  for(const [mode,input,expected] of [['full','strict','strict'],['full','robust','robust'],['full','broken','robust'],['full',undefined,'robust'],['region','strict',undefined]]){

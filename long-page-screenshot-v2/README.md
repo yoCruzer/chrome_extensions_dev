@@ -213,3 +213,10 @@ Region 在 preparation 后最后一次解析 anchors，并冻结 `s.region` 的�
 - captureVisibleTab 前后的 region/viewportRect 平移使用 post-capture mapping 作为最近观测值并记录 `regionCaptureRebases`；
 - 真正的 target/viewport/zoom/滚动位置变化仍保留环境或 FRAME_MOVED 保护；
 - 尺寸比较使用 0.5 CSS px epsilon，避免亚像素 jitter 误判。
+
+## Completion-First Reset — Save-name hardening + probable-score（2026-09-20）
+
+- 下载建议名不再按“80 个 JS 字符”截断；中文/emoji 可能一个字符占 3–4 UTF-8 bytes，因此标题现在在清洗非法路径字符后按 **160 UTF-8 bytes** 截断，整个 basename 保留充足文件系统余量且不会切断 surrogate pair。
+- 如果 Chrome 仍返回 `Invalid filename`，自动重试固定安全名 `LongScreenshot/<timestamp>-capture.png`，`metrics.filenameFallbacks` 记录是否发生过降级。截图与编码成功不会再因为页面标题不可用而整任务丢失。
+- Robust 对 `failed + insufficient-quality` 不再一概视为强矛盾。Matcher 额外统计所有 informative tiles（即使未通过 strict quality gate）的最佳 offset 共识；只有当 ≥60% 指向同一 offset、score ≥0.72 且最佳/次佳 score 差 ≥0.08 时，最终 recovery 才允许 `continuity=probable / fallbackMethod=probable-score`。
+- `width-mismatch / insufficient-overlap / Strict / unrelated frame` 仍不能使用该路径。Diagnostics 新增 `scoreCandidateOffset / scoreAgreeingTiles / scoreAgreementRatio / scoreBestScore / scoreSecondBestScore / probableScoreCorrections`。

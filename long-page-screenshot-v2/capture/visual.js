@@ -2,7 +2,8 @@
 // are four CSS pixels apart (capped at 384), independent of device/output scale.
 export const VISUAL = Object.freeze({ tiles: 12, maxWidth: 384, sampleX: 4,
   radius: 96, rows: 64, minTiles: 3, agreement: 0.6,
-  minDeviation: 5, maxError: 0.04, maxAbsoluteError: 0.5, margin: 0.018, exactMargin: 0.005 });
+  minDeviation: 5, maxError: 0.04, maxAbsoluteError: 0.5, margin: 0.018, exactMargin: 0.005,
+  probableScore: 0.72, probableScoreMargin: 0.08 });
 export const overlapCSS = height => Math.min(height - 32, Math.max(160, Math.min(320, height * 0.25)));
 
 
@@ -11,14 +12,23 @@ export const overlapCSS = height => Math.min(height - 32, Math.max(160, Math.min
 // placement only for ambiguity / low-information with coherent positive geometry.
 // Strong mismatch ("failed") and Strict policy remain fail-closed.
 export function robustPlacement(previous, expectedOffset, visual, policy = 'robust') {
-  if (policy !== 'robust' || !visual || !['ambiguous', 'low-information'].includes(visual.result)) return null;
+  const scoreProbable = visual?.result === 'failed' && visual.failureReason === 'insufficient-quality' &&
+    visual.scoreAgreeingTiles >= VISUAL.minTiles && visual.scoreAgreementRatio >= VISUAL.agreement &&
+    Number.isFinite(visual.scoreCandidateOffset) &&
+    visual.scoreBestScore >= VISUAL.probableScore &&
+    visual.scoreBestScore - visual.scoreSecondBestScore >= VISUAL.probableScoreMargin;
+  if (policy !== 'robust' || !visual ||
+      (!['ambiguous', 'low-information'].includes(visual.result) && !scoreProbable)) return null;
   const previousVisibleHeight = previous?.end - previous?.canonicalY;
   if (!Number.isFinite(expectedOffset) || expectedOffset <= 0 ||
       !Number.isFinite(previousVisibleHeight) || previousVisibleHeight <= 0 ||
       expectedOffset >= previousVisibleHeight) return null;
 
   let placementOffset = expectedOffset, fallbackMethod = 'geometry';
-  if (visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
+  if (scoreProbable) {
+    placementOffset = visual.scoreCandidateOffset;
+    fallbackMethod = 'probable-score';
+  } else if (visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
       Number.isFinite(visual.candidateOffset)) {
     placementOffset = visual.candidateOffset;
     fallbackMethod = 'probable-visual';
@@ -34,7 +44,7 @@ export function robustPlacement(previous, expectedOffset, visual, policy = 'robu
       fallbackMethod,
       placementOffset,
       placementCorrection: placementOffset - expectedOffset,
-      path: fallbackMethod === 'probable-visual' ? 'probable-visual' : 'geometry-fallback'
+      path: fallbackMethod === 'geometry' ? 'geometry-fallback' : fallbackMethod
     }
   };
 }
@@ -45,9 +55,13 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
   policy = policy === 'strict' ? 'strict' : 'robust';
   const informative = [];
   const base = { policy, expectedOffset, matchedOffset: null, correction: null,
-    candidateOffset: null, candidateCorrection: null, searchRadius: radius,
-    overlapHeight: previous.height - expectedOffset, informativeTiles: 0, qualityTiles: 0, agreeingTiles: 0,
-    agreementRatio: 0, qualityRatio: 0, bestScore: 0, secondBestScore: 0, confidence: 0, failureReason: null };
+    candidateOffset: null, candidateCorrection: null,
+    scoreCandidateOffset: null, scoreCandidateCorrection: null,
+    searchRadius: radius, overlapHeight: previous.height - expectedOffset,
+    informativeTiles: 0, qualityTiles: 0, agreeingTiles: 0, scoreAgreeingTiles: 0,
+    agreementRatio: 0, scoreAgreementRatio: 0, qualityRatio: 0,
+    bestScore: 0, secondBestScore: 0, scoreBestScore: 0, scoreSecondBestScore: 0,
+    confidence: 0, failureReason: null };
   if (width !== current.width) return { ...base, result: 'failed', failureReason: 'width-mismatch' };
   const low = Math.max(1, Math.round(expectedOffset) - radius);
   const high = Math.min(previous.height - 32, Math.round(expectedOffset) + radius);
@@ -114,6 +128,19 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
   if (agreeing.length) {
     base.candidateOffset = agreeing[0].offset;
     base.candidateCorrection = base.candidateOffset - expectedOffset;
+  }
+  let scoreAgreeing = [];
+  for (const score of scores) {
+    const group = scores.filter(other => other.offset === score.offset);
+    if (group.length > scoreAgreeing.length) scoreAgreeing = group;
+  }
+  base.scoreAgreeingTiles = scoreAgreeing.length;
+  base.scoreAgreementRatio = scoreAgreeing.length / base.informativeTiles;
+  if (scoreAgreeing.length) {
+    base.scoreCandidateOffset = scoreAgreeing[0].offset;
+    base.scoreCandidateCorrection = base.scoreCandidateOffset - expectedOffset;
+    base.scoreBestScore = 1 / (1 + scoreAgreeing.reduce((sum, score) => sum + score.error, 0) / scoreAgreeing.length);
+    base.scoreSecondBestScore = 1 / (1 + scoreAgreeing.reduce((sum, score) => sum + score.second, 0) / scoreAgreeing.length);
   }
   const summary = agreeing.length ? agreeing : scores;
   if (summary.length) {

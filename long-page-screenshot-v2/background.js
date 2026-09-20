@@ -83,7 +83,7 @@ async function start(mode, output = "auto", continuityPolicy = "robust") {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^(https?|file):\/\//.test(tab.url || "")) throw new Error("请在普通网页中使用；浏览器内部页面不支持截图。");
   if (active) throw new Error("已有截图任务，请先取消或等待完成。");
-  const s = { id: crypto.randomUUID(), tab, mode, output, metrics: { captures: 0, settles: 0, encodeMs: 0, saveMs: 0, retries: 0, frameRetries: 0 }, started: Date.now(), frames: 0, parts: 0, cancelled: false };
+  const s = { id: crypto.randomUUID(), tab, mode, output, metrics: { captures: 0, settles: 0, encodeMs: 0, saveMs: 0, retries: 0, frameRetries: 0, filenameFallbacks: 0 }, started: Date.now(), frames: 0, parts: 0, cancelled: false };
   if (mode === "full") s.continuityPolicy = continuityPolicy === "strict" ? "strict" : "robust";
   active = s;
   try {
@@ -408,6 +408,7 @@ function recordVisual(s, match, retry) {
   if (match.continuity === "probable") d.probablePlacements++;
   if (match.fallbackMethod === "geometry") d.geometryFallbacks++;
   if (match.fallbackMethod === "probable-visual") d.probableVisualCorrections++;
+  if (match.fallbackMethod === "probable-score") d.probableScoreCorrections++;
   if (match.failureReason === "insufficient-quality") d.insufficientQualityRejects++;
   if (["width-mismatch", "insufficient-overlap"].includes(match.failureReason)) d.structuralVisualRejects++;
   if (retry) d.visualRecoveryRetries++;
@@ -425,7 +426,7 @@ function recordVisual(s, match, retry) {
 async function captureFull(s, view, dataUrl) {
   s.full.visual ||= { continuityPolicy: s.continuityPolicy, strictCoverageChecks: 0, strictCoverageFailures: 0, visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
     visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
-    probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0,
+    probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0, probableScoreCorrections: 0,
     insufficientQualityRejects: 0, structuralVisualRejects: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
@@ -505,11 +506,41 @@ async function captureFull(s, view, dataUrl) {
   s.outputSize = await request(s, "offscreen", "FULL_FINALIZE");
 }
 
+
+function utf8CodePointBytes(char) {
+  const code = char.codePointAt(0);
+  return code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+}
+
+function safeTitle(raw, maxBytes = 160) {
+  let value = String(raw || "page");
+  try { value = value.normalize("NFKC"); } catch { /* normalization is optional */ }
+  value = value.replace(/[\\/:*?"<>|\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "-")
+    .replace(/\s+/g, " ").trim().replace(/^[. ]+|[. ]+$/g, "");
+  let bytes = 0, out = "";
+  for (const char of value) {
+    const size = utf8CodePointBytes(char);
+    if (bytes + size > maxBytes) break;
+    out += char; bytes += size;
+  }
+  return out.replace(/[. ]+$/g, "") || "page";
+}
+
+function suggestedFilename(stamp, title) {
+  return `LongScreenshot/${stamp}-${safeTitle(title)}.png`;
+}
+
 async function saveImage(s, url) {
   await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
   check(s);
-  const title = (s.tab.title || "page").replace(/[\\/:*?"<>|\x00-\x1f]/g, "-").trim().slice(0, 80) || "page";
-  s.downloadId = await chrome.downloads.download({ url, filename: `LongScreenshot/${s.stamp}-${title}.png` });
+  const filename = suggestedFilename(s.stamp, s.tab.title);
+  try {
+    s.downloadId = await chrome.downloads.download({ url, filename });
+  } catch (error) {
+    if (!/invalid filename/i.test(error?.message || "")) throw error;
+    s.metrics.filenameFallbacks++;
+    s.downloadId = await chrome.downloads.download({ url, filename: `LongScreenshot/${s.stamp}-capture.png` });
+  }
   await status(s, "saving", "正在保存，若弹出保存窗口请选择位置…");
   const started = Date.now();
   while (Date.now() - started < 120_000) {
