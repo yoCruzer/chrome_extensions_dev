@@ -409,6 +409,7 @@ function recordVisual(s, match, retry) {
   if (match.fallbackMethod === "geometry") d.geometryFallbacks++;
   if (match.fallbackMethod === "probable-visual") d.probableVisualCorrections++;
   if (match.fallbackMethod === "probable-score") d.probableScoreCorrections++;
+  if (match.fallbackMethod === "geometry-score") d.geometryScoreFallbacks++;
   if (match.failureReason === "insufficient-quality") d.insufficientQualityRejects++;
   if (["width-mismatch", "insufficient-overlap"].includes(match.failureReason)) d.structuralVisualRejects++;
   if (retry) d.visualRecoveryRetries++;
@@ -427,7 +428,7 @@ async function captureFull(s, view, dataUrl) {
   s.full.visual ||= { continuityPolicy: s.continuityPolicy, strictCoverageChecks: 0, strictCoverageFailures: 0, visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
     visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
     probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0, probableScoreCorrections: 0,
-    insufficientQualityRejects: 0, structuralVisualRejects: 0,
+    geometryScoreFallbacks: 0, insufficientQualityRejects: 0, structuralVisualRejects: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
   const x = s.region.x;
@@ -580,15 +581,12 @@ async function run(s) {
             s.metrics.retries++;
             await status(s, "loading", "所选内容发生变化，正在重新截图…");
           }
-          // No canvas exists yet: adopt a coherent current region before Attempt's
-          // first committed frame. Bound acquisition even if the page keeps moving.
+          // The final UI edge values are the user's selected visual Scope. PREPARE
+          // may normalize layout, but anchors must not rewrite these coordinates.
           for (let sample = 0; sample < 3; sample++) {
             try {
-              const resolved = await request(s, "content", "MEASURE");
-              s.targetViewport = { width: resolved.clientWidth, height: resolved.clientHeight };
-              s.region = regionFromEdges({ left: resolved.region.x, top: resolved.region.y,
-                right: resolved.region.x + resolved.region.width, bottom: resolved.region.y + resolved.region.height }, resolved);
-              validateView(s, resolved);
+              s.targetViewport = { width: s.viewport.clientWidth, height: s.viewport.clientHeight };
+              s.region = regionFromEdges(s.edges, s.viewport);
               await request(s, "content", "REGION_FREEZE", { region: s.region });
               view = await scroll(s, s.region.x, s.region.y);
               outputGeometry(s.region, view, { width: view.innerWidth, height: view.innerHeight }, s.output === "device" ? "auto" : s.output);

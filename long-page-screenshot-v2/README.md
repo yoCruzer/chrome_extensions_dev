@@ -242,3 +242,25 @@ Region 在 preparation 后最后一次解析 anchors，并冻结 `s.region` 的�
 - retry 1：只允许 strong `probable-score`；
 - retry 2：允许原有 ambiguous/low-information geometry/probable fallback，以及 strong probable-score；
 - Strict 三次都不允许 probable fallback。
+
+### Phase 2.2 correction — freeze the actual UI edges, not post-PREPARE anchors
+
+Region 左偏的根因进一步确认：虽然 `REGION_FREEZE` 之后 crop 已冻结，但旧流程仍会在 PREPARE 后先 `MEASURE → resolveRegion(anchors)`，因此 freeze 之前就可能把用户看到的 200–1200 改成其它坐标。
+
+现在：
+
+- 选择 UI 不再在滚动/更新时持续用 anchors 重写四个数字；
+- 第二角选择后只有在共同 CaptureTarget **发生改变**时，才一次性把两个角转换到新的 target coordinate system；
+- 点击“开始截图”时 UI 中最终显示的 `left/top/right/bottom` 就是 authoritative Scope；
+- PREPARE 后 background 直接 `regionFromEdges(s.edges, s.viewport)`，不再通过 anchors 重建 region；
+- anchors 在正式 capture 中只保留诊断用途。
+
+### Robust final geometry-score
+
+最终 retry 的 `insufficient-quality` 只有在低质量 raw-score 仍满足：
+
+- `scoreAgreementRatio >= 0.5`；
+- 多数候选 offset 与浏览器 observed expectedOffset 相差 ≤1 CSS px；
+- `scoreBestScore >= 0.75`；
+
+才允许 `fallbackMethod=geometry-score`。这覆盖真实的 `272→272 / 0.75 / 0.965` trace，而 unrelated frame 的低 agreement/低 score 仍失败。Strict 不使用该路径。

@@ -212,3 +212,8 @@ test('Full Page Robust exposes strong probable-score on retry 1 and all fallback
   assert.match(source,/robustFallbackMode:\s*s\.continuityPolicy === "strict" \? null : retry === 1 \? "score" : retry === 2 \? "all" : null/);
   assert.doesNotMatch(source,/allowRobustFallback:/);
 });
+
+test('Region run freezes the original UI edges instead of rebuilding Scope from resolved anchors', () => {
+  assert.match(source,/s\.region = regionFromEdges\(s\.edges, s\.viewport\)/);
+  assert.doesNotMatch(source,/left: resolved\.region\.x/);
+});

@@ -17,11 +17,16 @@ export function robustPlacement(previous, expectedOffset, visual, policy = 'robu
     Number.isFinite(visual.scoreCandidateOffset) &&
     visual.scoreBestScore >= VISUAL.probableScore &&
     visual.scoreBestScore - visual.scoreSecondBestScore >= VISUAL.probableScoreMargin;
+  const geometryScoreProbable = visual?.result === 'failed' && visual.failureReason === 'insufficient-quality' &&
+    Number.isFinite(visual.scoreCandidateOffset) &&
+    Math.abs(visual.scoreCandidateOffset - Math.round(expectedOffset)) <= 1 &&
+    visual.scoreAgreementRatio >= 0.5 && visual.scoreBestScore >= 0.75;
   const allowScore = fallbackMode === 'score' || fallbackMode === 'all';
   const allowGeometry = fallbackMode === 'all';
   if (policy !== 'robust' || !visual ||
       (!allowGeometry && !(allowScore && scoreProbable)) ||
-      (allowGeometry && !['ambiguous', 'low-information'].includes(visual.result) && !scoreProbable)) return null;
+      (allowGeometry && !['ambiguous', 'low-information'].includes(visual.result) &&
+        !scoreProbable && !geometryScoreProbable)) return null;
   const previousVisibleHeight = previous?.end - previous?.canonicalY;
   if (!Number.isFinite(expectedOffset) || expectedOffset <= 0 ||
       !Number.isFinite(previousVisibleHeight) || previousVisibleHeight <= 0 ||
@@ -31,6 +36,9 @@ export function robustPlacement(previous, expectedOffset, visual, policy = 'robu
   if (allowScore && scoreProbable) {
     placementOffset = visual.scoreCandidateOffset;
     fallbackMethod = 'probable-score';
+  } else if (allowGeometry && geometryScoreProbable) {
+    placementOffset = expectedOffset;
+    fallbackMethod = 'geometry-score';
   } else if (allowGeometry && visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
       Number.isFinite(visual.candidateOffset)) {
     placementOffset = visual.candidateOffset;

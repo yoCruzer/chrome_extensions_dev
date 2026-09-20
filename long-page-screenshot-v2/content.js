@@ -548,7 +548,7 @@
       *{box-sizing:border-box} #panel{pointer-events:auto;position:absolute;right:16px;top:16px;width:300px;padding:16px;background:#182231;color:white;border-radius:12px;box-shadow:0 5px 25px #0006;font:14px/1.5 system-ui}
       h2{font-size:16px;margin:0 0 8px} p{margin:8px 0} .fields{display:grid;grid-template-columns:1fr 1fr;gap:8px} label{display:block} input{width:100%;padding:6px;border:1px solid #8796ab;border-radius:4px} button{padding:7px;margin:5px 3px 0 0;cursor:pointer} #hint{font-size:12px;color:#d5e6ff} #outline{position:fixed;border:2px solid #2687ff;background:#2687ff15;pointer-events:none} #picker{position:absolute;inset:0;pointer-events:auto;cursor:crosshair} [hidden]{display:none!important}
       </style><div id="outline"></div><div id="picker" hidden></div><section id="panel">
-      <h2>选择长截图区域</h2><p>先点选左上角，滚动页面后再点选右下角；也可直接修改边界。</p>
+      <h2>选择长截图区域</h2><p>先点选左上角，滚动页面后再点选右下角；开始截图后将按这里显示的四条边界固定裁剪。</p>
       <div class="fields"><label>左<input id="left" type="number" min="0" value="0"></label><label>右<input id="right" type="number" min="1" value="${page.clientWidth}"></label><label>上<input id="top" type="number" min="0" value="0"></label><label>下<input id="bottom" type="number" min="1" value="${page.height}"></label></div>
       <button id="first">点选左上角</button><button id="second">点选右下角</button><button id="capture">开始截图</button><button id="cancel">取消</button><p id="hint">点选跟随内容；修改数字使用固定坐标。Esc 可取消。</p></section>`;
     s.host = host;
@@ -556,15 +556,8 @@
     const $ = id => shadow.getElementById(id);
     const values = () => Object.fromEntries(["left", "right", "top", "bottom"].map(key => [key, Number($(key).value)]));
     const update = () => {
-      let v = values();
-      if (s.anchors?.first && s.anchors?.second) {
-        try {
-          s.edges = v;
-          const r = resolveRegion(s);
-          v = { left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height };
-          for (const key of Object.keys(v)) $(key).value = v[key];
-        } catch { /* Start reports invalid anchors. */ }
-      }
+      const v = values();
+      s.edges = v;
       const view = targetView(s);
       $("outline").style.cssText = `left:${v.left - view.x + view.viewportRect.left}px;top:${v.top - view.y + view.viewportRect.top}px;width:${Math.max(0, v.right - v.left)}px;height:${Math.max(0, v.bottom - v.top)}px`;
       for (const key of ["left", "right", "top", "bottom"]) $(key).disabled = !!s.target;
@@ -572,7 +565,7 @@
     };
     document.addEventListener("scroll", update, { passive: true, capture: true });
     s.removeSelectionListener = () => document.removeEventListener("scroll", update, true);
-    shadow.addEventListener("input", () => { s.anchors = null; s.target = null; update(); });
+    shadow.addEventListener("input", () => { s.anchors = null; s.target = null; s.edges = values(); update(); });
     for (const [button, keys] of [["first", ["left", "top"]], ["second", ["right", "bottom"]]]) {
       $(button).onclick = () => {
         $("picker").hidden = false;
@@ -580,13 +573,22 @@
         $("picker").onclick = event => {
           event.preventDefault(); event.stopPropagation();
           try {
+            const oldTarget = s.target?.element;
             s.anchors ||= {};
             s.anchors[button] = anchorAt(s, event.clientX, event.clientY);
             detectTarget(s);
+            if (button === "second" && s.anchors.first && oldTarget !== s.target?.element) {
+              // If the common CaptureTarget changed after choosing the second
+              // corner, convert both corners once into the new target coordinates.
+              const r = resolveRegion(s);
+              const v = { left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height };
+              for (const key of Object.keys(v)) $(key).value = v[key];
+            } else {
+              const point = targetPoint(s, event.clientX, event.clientY);
+              $(keys[0]).value = point.x;
+              $(keys[1]).value = point.y;
+            }
           } catch (error) { $("hint").textContent = error.message; return; }
-          const point = targetPoint(s, event.clientX, event.clientY);
-          $(keys[0]).value = point.x;
-          $(keys[1]).value = point.y;
           $("picker").hidden = true;
           update();
         };

@@ -138,3 +138,22 @@ test('Robust accepts strong probable-score after one retry without weakening the
   assert.ok(weakened.scoreBestScore-weakened.scoreSecondBestScore < VISUAL.probableScoreMargin);
   assert.equal(robustPlacement(previous,272,weakened,'robust','score'),null);
 });
+
+test('Final Robust recovery uses geometry-score when low-quality majority still agrees with observed geometry', () => {
+  const trace={
+    result:'failed',failureReason:'insufficient-quality',
+    scoreAgreeingTiles:6,scoreAgreementRatio:0.75,scoreCandidateOffset:272,
+    scoreBestScore:0.9653255460749157,scoreSecondBestScore:0.8924851674791702
+  };
+  const placement=robustPlacement({canonicalY:1000,end:1704},272,trace,'robust','all');
+  assert.equal(placement.visual.fallbackMethod,'geometry-score');
+  assert.equal(placement.visual.placementOffset,272);
+  assert.equal(placement.visual.continuity,'probable');
+
+  const unrelated={
+    ...trace,scoreAgreeingTiles:1,scoreAgreementRatio:0.125,scoreCandidateOffset:250,
+    scoreBestScore:0.51,scoreSecondBestScore:0.50
+  };
+  assert.equal(robustPlacement({canonicalY:1000,end:1704},272,unrelated,'robust','all'),null);
+  assert.equal(robustPlacement({canonicalY:1000,end:1704},272,trace,'strict','all'),null);
+});

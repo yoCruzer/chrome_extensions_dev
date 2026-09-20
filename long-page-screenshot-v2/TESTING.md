@@ -358,3 +358,10 @@ Deterministic tests must evaluate the frozen visual Scope, not require the final
 - Anchor 平移只增加 `anchorTranslations` diagnostics。
 - Full Page: 使用用户真实 trace 构造 strong retry-1 probable-score；保持 `probableScoreMargin=0.08` 不变，retry 1 即可接受。
 - retry-2 margin 不足 0.08 的同类证据仍不能仅因“最后一次”而降低门槛。
+
+## Phase 2.2 targeted corrections — 2026-09-20
+
+- Region selection UI edges are authoritative: update/scroll must not silently rewrite 200–1200 into anchor-derived coordinates.
+- Background must freeze `regionFromEdges(s.edges, s.viewport)`, never rebuild from `resolved.region` after PREPARE.
+- Full Page final Robust recovery: real trace `expected=272 / scoreCandidate=272 / agreement=.75 / best=.965` → `geometry-score`.
+- Unrelated low-score/low-agreement frame remains rejected; Strict remains verified-only.
