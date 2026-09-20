@@ -207,3 +207,8 @@ test('START validates Full Page policy and omits it for Region', async () => {
   assert.equal(session.continuityPolicy,expected);
  }
 });
+
+test('Full Page Robust exposes strong probable-score on retry 1 and all fallbacks only on retry 2', () => {
+  assert.match(source,/robustFallbackMode:\s*s\.continuityPolicy === "strict" \? null : retry === 1 \? "score" : retry === 2 \? "all" : null/);
+  assert.doesNotMatch(source,/allowRobustFallback:/);
+});

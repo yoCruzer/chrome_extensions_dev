@@ -447,7 +447,7 @@ async function captureFull(s, view, dataUrl) {
       const evidence = (counters?.witnessMoved || 0) + (counters?.witnessResized || 0) + (counters?.witnessRemoved || 0);
       let result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x,
         uncertain: retry > 0 || evidence !== (s.visualEvidence || 0) || view.height !== s.visualHeight,
-        allowRobustFallback: retry === 2 && s.continuityPolicy !== "strict",
+        robustFallbackMode: s.continuityPolicy === "strict" ? null : retry === 1 ? "score" : retry === 2 ? "all" : null,
         firstColumn: true });
       dataUrl = null;
       recordVisual(s, result.visual, retry);

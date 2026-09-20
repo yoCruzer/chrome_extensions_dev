@@ -351,3 +351,10 @@ Deterministic tests must evaluate the frozen visual Scope, not require the final
 - 相邻帧仅有细微确定性像素噪声：strict quality gate 可返回 `insufficient-quality`，但 raw score 多数仍指向同一 offset，Robust 使用 `probable-score`；
 - 完全 unrelated frame：raw offset 不形成高质量多数，仍无 Robust fallback；
 - Strict 永远不使用 probable-score。
+
+## Phase 2.1 targeted corrections — 2026-09-20
+
+- Region: frozen `x/y/width/height` 不得因 anchors 后续平移而改变；选择 200–1200 的水平区域必须继续以 200–1200 为 crop Scope。
+- Anchor 平移只增加 `anchorTranslations` diagnostics。
+- Full Page: 使用用户真实 trace 构造 strong retry-1 probable-score；保持 `probableScoreMargin=0.08` 不变，retry 1 即可接受。
+- retry-2 margin 不足 0.08 的同类证据仍不能仅因“最后一次”而降低门槛。

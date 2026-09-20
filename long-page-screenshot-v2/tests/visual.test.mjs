@@ -121,3 +121,20 @@ test('Robust probable-score accepts coherent noisy alignment but still rejects u
   assert.equal(robustPlacement({canonicalY:1000,end:1700},525,unrelated,'robust'),null);
   assert.equal(robustPlacement({canonicalY:1000,end:1700},525,noisy,'strict'),null);
 });
+
+test('Robust accepts strong probable-score after one retry without weakening the score threshold', () => {
+  const trace = {
+    result:'failed', failureReason:'insufficient-quality',
+    scoreAgreeingTiles:4, scoreAgreementRatio:0.8, scoreCandidateOffset:528,
+    scoreBestScore:0.9871222478008116, scoreSecondBestScore:0.864237836187155
+  };
+  const previous={canonicalY:0,end:704};
+  assert.equal(robustPlacement(previous,528,trace,'robust','score').visual.fallbackMethod,'probable-score');
+  assert.equal(robustPlacement(previous,528,trace,'robust','score').visual.placementOffset,528);
+  assert.equal(robustPlacement(previous,528,trace,'robust','all').visual.fallbackMethod,'probable-score');
+  assert.equal(robustPlacement(previous,528,trace,'strict','score'),null);
+
+  const weakened={...trace,scoreBestScore:0.9653255460749157,scoreSecondBestScore:0.8924851674791702};
+  assert.ok(weakened.scoreBestScore-weakened.scoreSecondBestScore < VISUAL.probableScoreMargin);
+  assert.equal(robustPlacement(previous,272,weakened,'robust','score'),null);
+});

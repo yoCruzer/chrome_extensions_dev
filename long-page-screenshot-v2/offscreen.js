@@ -122,8 +122,8 @@ async function handle(m) {
         } else visual.path = 'fast';
         if (visual.result !== 'matched') {
           anchored = session.continuityPolicy !== "strict" && m.bottomExtent !== undefined && bottomTail(m.view, session.previous.end, m.bottomExtent);
-          fallback = !anchored && m.allowRobustFallback
-            ? robustPlacement(session.previous, expected, visual, session.continuityPolicy)
+          fallback = !anchored && m.robustFallbackMode
+            ? robustPlacement(session.previous, expected, visual, session.continuityPolicy, m.robustFallbackMode)
             : null;
           if (!anchored && !fallback) return { accepted: false, visual, canonicalEnd: session.previous.end };
         }

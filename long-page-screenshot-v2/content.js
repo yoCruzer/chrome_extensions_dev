@@ -338,23 +338,27 @@
 
   function regionForCapture(s) {
     if (!s.frozenRegion) return resolveRegion(s);
-    if (!s.anchors?.first || !s.anchors?.second) return s.runtimeRegion || s.frozenRegion;
-    try {
-      const resolved = resolveRegion(s);
-      const dx = resolved.x - s.frozenRegion.x, dy = resolved.y - s.frozenRegion.y;
-      const shapeChanged = Math.abs(resolved.width - s.frozenRegion.width) > 0.5 ||
-        Math.abs(resolved.height - s.frozenRegion.height) > 0.5;
-      if (shapeChanged) s.regionDiagnostics.shapeChanges++;
-      s.runtimeRegion = { x: s.frozenRegion.x + dx, y: s.frozenRegion.y + dy,
-        width: s.frozenRegion.width, height: s.frozenRegion.height };
-      s.regionDiagnostics.anchorResolutions++;
-      return s.runtimeRegion;
-    } catch (error) {
-      if (!["ANCHOR_UNRESOLVABLE", "REGION_INVALID"].includes(error.reasonCode)) throw error;
-      s.regionDiagnostics.anchorFallbacks++;
-      s.regionDiagnostics.lastAnchorReason = error.reasonCode;
-      return s.runtimeRegion || s.frozenRegion;
+    if (s.anchors?.first && s.anchors?.second) {
+      try {
+        const resolved = resolveRegion(s);
+        const dx = resolved.x - s.frozenRegion.x, dy = resolved.y - s.frozenRegion.y;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          s.regionDiagnostics.anchorTranslations++;
+          s.regionDiagnostics.lastAnchorDelta = { dx, dy };
+        }
+        if (Math.abs(resolved.width - s.frozenRegion.width) > 0.5 ||
+            Math.abs(resolved.height - s.frozenRegion.height) > 0.5) s.regionDiagnostics.shapeChanges++;
+        s.regionDiagnostics.anchorResolutions++;
+      } catch (error) {
+        if (!["ANCHOR_UNRESOLVABLE", "REGION_INVALID"].includes(error.reasonCode)) throw error;
+        s.regionDiagnostics.anchorFallbacks++;
+        s.regionDiagnostics.lastAnchorReason = error.reasonCode;
+      }
     }
+    // After REGION_FREEZE the user's Target-local visual rectangle is authoritative.
+    // Anchors are diagnostics only; they must not translate the crop.
+    s.runtimeRegion = { ...s.frozenRegion };
+    return s.runtimeRegion;
   }
 
   function regionView(s) {
@@ -641,7 +645,7 @@
             m.region.width <= 0 || m.region.height <= 0) throw Object.assign(new Error("选区冻结失败。"), { reasonCode: "REGION_INVALID" });
         s.frozenRegion = { ...m.region };
         s.runtimeRegion = { ...m.region };
-        s.regionDiagnostics = { anchorResolutions: 0, anchorFallbacks: 0, shapeChanges: 0 };
+        s.regionDiagnostics = { anchorResolutions: 0, anchorFallbacks: 0, anchorTranslations: 0, shapeChanges: 0 };
         return { region: s.runtimeRegion };
       }
       if (m.type === "MEASURE" && m.watch) fullProof(s, true);

@@ -11,28 +11,32 @@ export const overlapCSS = height => Math.min(height - 32, Math.max(160, Math.min
 // This never upgrades uncertainty to "matched": it returns an explicit probable
 // placement only for ambiguity / low-information with coherent positive geometry.
 // Strong mismatch ("failed") and Strict policy remain fail-closed.
-export function robustPlacement(previous, expectedOffset, visual, policy = 'robust') {
+export function robustPlacement(previous, expectedOffset, visual, policy = 'robust', fallbackMode = 'all') {
   const scoreProbable = visual?.result === 'failed' && visual.failureReason === 'insufficient-quality' &&
     visual.scoreAgreeingTiles >= VISUAL.minTiles && visual.scoreAgreementRatio >= VISUAL.agreement &&
     Number.isFinite(visual.scoreCandidateOffset) &&
     visual.scoreBestScore >= VISUAL.probableScore &&
     visual.scoreBestScore - visual.scoreSecondBestScore >= VISUAL.probableScoreMargin;
+  const allowScore = fallbackMode === 'score' || fallbackMode === 'all';
+  const allowGeometry = fallbackMode === 'all';
   if (policy !== 'robust' || !visual ||
-      (!['ambiguous', 'low-information'].includes(visual.result) && !scoreProbable)) return null;
+      (!allowGeometry && !(allowScore && scoreProbable)) ||
+      (allowGeometry && !['ambiguous', 'low-information'].includes(visual.result) && !scoreProbable)) return null;
   const previousVisibleHeight = previous?.end - previous?.canonicalY;
   if (!Number.isFinite(expectedOffset) || expectedOffset <= 0 ||
       !Number.isFinite(previousVisibleHeight) || previousVisibleHeight <= 0 ||
       expectedOffset >= previousVisibleHeight) return null;
 
   let placementOffset = expectedOffset, fallbackMethod = 'geometry';
-  if (scoreProbable) {
+  if (allowScore && scoreProbable) {
     placementOffset = visual.scoreCandidateOffset;
     fallbackMethod = 'probable-score';
-  } else if (visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
+  } else if (allowGeometry && visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
       Number.isFinite(visual.candidateOffset)) {
     placementOffset = visual.candidateOffset;
     fallbackMethod = 'probable-visual';
   }
+  if (!allowGeometry && fallbackMethod === 'geometry') return null;
   if (!Number.isFinite(placementOffset) || placementOffset <= 0 || placementOffset >= previousVisibleHeight) return null;
 
   return {

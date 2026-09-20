@@ -220,3 +220,25 @@ Region 在 preparation 后最后一次解析 anchors，并冻结 `s.region` 的�
 - 如果 Chrome 仍返回 `Invalid filename`，自动重试固定安全名 `LongScreenshot/<timestamp>-capture.png`，`metrics.filenameFallbacks` 记录是否发生过降级。截图与编码成功不会再因为页面标题不可用而整任务丢失。
 - Robust 对 `failed + insufficient-quality` 不再一概视为强矛盾。Matcher 额外统计所有 informative tiles（即使未通过 strict quality gate）的最佳 offset 共识；只有当 ≥60% 指向同一 offset、score ≥0.72 且最佳/次佳 score 差 ≥0.08 时，最终 recovery 才允许 `continuity=probable / fallbackMethod=probable-score`。
 - `width-mismatch / insufficient-overlap / Strict / unrelated frame` 仍不能使用该路径。Diagnostics 新增 `scoreCandidateOffset / scoreAgreeingTiles / scoreAgreementRatio / scoreBestScore / scoreSecondBestScore / probableScoreCorrections`。
+
+### Phase 2.1 correction — Region coordinates are authoritative after freeze
+
+真实验收发现继续用 anchor translation 驱动 crop 会把用户选择的 `x=200…1200` 跟随到例如 `x=20…1020`。这不是期望的 Region 语义。
+
+因此 `REGION_FREEZE` 之后：
+
+- `frozenRegion.x/y/width/height` 是唯一 authoritative crop；
+- anchors 只记录 `anchorTranslations / lastAnchorDelta / shapeChanges / anchorFallbacks`；
+- anchor 平移、形状变化或临时失效都不再修改 runtime crop；
+- Region 的承诺是“用户确认的 Target-local 视觉矩形”，不是持续追踪内容对象。
+
+### Robust probable-score retry timing
+
+真实 trace 在 retry 0/1 连续给出同一 `528px` offset：`scoreAgreement=0.8`、`scoreBest=0.987`、best-second≈0.123，已经满足现有 strong probable-score 门槛；retry 2 扩大 overlap 后反而使 margin 降到≈0.073。
+
+因此不降低 `probableScoreMargin=0.08`。Robust 改为：
+
+- retry 0：verified match only；
+- retry 1：只允许 strong `probable-score`；
+- retry 2：允许原有 ambiguous/low-information geometry/probable fallback，以及 strong probable-score；
+- Strict 三次都不允许 probable fallback。
