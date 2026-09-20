@@ -1,4 +1,4 @@
-import { regionFromEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
+import { regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "./capture/planner.js";
 import { VISUAL, overlapCSS } from "./capture/visual.js";
 import { bottomTail } from "./capture/bottom-tail.js";
@@ -172,7 +172,8 @@ function validateRegion(s, page) {
 // Stitch in the attempt's coordinate system even when the real document moves.
 function relativeView(s, view) {
   if (s.mode !== "region") return view;
-  return { ...view, x: view.x - view.region.x + s.region.x, y: view.y - view.region.y + s.region.y };
+  return { ...view, x: s.region.x, y: view.y - view.region.y + s.region.y,
+    cropLeft: s.regionCropLeft };
 }
 
 async function scroll(s, x, y) {
@@ -184,7 +185,7 @@ async function scroll(s, x, y) {
   await ensureVisible(s);
   if (s.mode === "region") await delay(Math.max(0, 550 - (Date.now() - lastCapture)));
   const view = await request(s, "content", "SCROLL", s.mode === "region"
-    ? { x: x - s.region.x, y: y - s.region.y, relative: true }
+    ? { x: 0, y: y - s.region.y, relative: true }
     : { x: Math.floor(x), y: Math.floor(y) });
   validateView(s, view);
   return view;
@@ -586,8 +587,14 @@ async function run(s) {
           for (let sample = 0; sample < 3; sample++) {
             try {
               s.targetViewport = { width: s.viewport.clientWidth, height: s.viewport.clientHeight };
-              s.region = regionFromEdges(s.edges, s.viewport);
-              await request(s, "content", "REGION_FREEZE", { region: s.region });
+              const selected = verticalRegionFromViewportEdges(s.edges, s.viewport);
+              s.regionCropLeft = selected.cropLeft;
+              s.region = { x: selected.x, y: selected.y, width: selected.width, height: selected.height };
+              s.diagnostics = { ...s.diagnostics, regionViewport: {
+                left: selected.cropLeft, right: selected.cropRight, width: selected.width,
+                targetViewportLeft: s.viewport.viewportRect?.left || 0, targetKind: s.viewport.targetKind
+              } };
+              await request(s, "content", "REGION_FREEZE", { region: s.region, cropLeft: s.regionCropLeft });
               view = await scroll(s, s.region.x, s.region.y);
               outputGeometry(s.region, view, { width: view.innerWidth, height: view.innerHeight }, s.output === "device" ? "auto" : s.output);
               ({ view, dataUrl } = await capture(s, view));

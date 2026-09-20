@@ -264,3 +264,18 @@ Region 左偏的根因进一步确认：虽然 `REGION_FREEZE` 之后 crop 已�
 - `scoreBestScore >= 0.75`；
 
 才允许 `fallbackMethod=geometry-score`。这覆盖真实的 `272→272 / 0.75 / 0.965` trace，而 unrelated frame 的低 agreement/低 score 仍失败。Strict 不使用该路径。
+
+### Phase 2.3 — Region uses hybrid coordinates and vertical-only scrolling
+
+真实页面稳定出现约 180px 左偏，和自动选中的内部 CaptureTarget 左边缘高度吻合。旧模型把鼠标 `clientX=200` 转成容器局部 `x=20`，导致用户视觉选择和内部横向坐标语义混在一起。
+
+Region 现在采用：
+
+- **横向：浏览器 viewport CSS 坐标**，例如屏幕看到的 200–1200 就永远裁 bitmap 的 200–1200；
+- **纵向：CaptureTarget 内容坐标**，用于跨屏长区域的垂直滚动；
+- Region 只纵向滚动，保持 window/element 当前 horizontal scroll 不变；
+- 内部 region 的输出 x 归一化为 0，`cropLeft` 单独记录 bitmap 源裁剪起点；
+- `drawGeometry()` 在 Region 有 `cropLeft` 时直接用它作为 bitmap 横向源起点；
+- diagnostics `regionViewport` 记录 left/right/width、targetViewportLeft 和 targetKind。
+
+因此内部容器即使位于 viewport `left=180`，用户选 `200–1200` 时输出仍从 bitmap x=200 开始，而不是把 20 当成浏览器横坐标。

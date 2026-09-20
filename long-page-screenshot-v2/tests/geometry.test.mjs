@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { regionFromEdges, outputGeometry, drawGeometry, pixelEdge, MAX_PIXELS, sameViewport } from "../capture/geometry.js";
+import { regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, drawGeometry, pixelEdge, MAX_PIXELS, sameViewport } from "../capture/geometry.js";
 import { visibleTile } from "../capture/planner.js";
 
 test("selection validates all four document edges", () => {
@@ -98,4 +98,18 @@ test('nested target crop adds browser viewport origin using bitmap-derived scale
   const scale = outputGeometry(region,view,{width:1800,height:1400},'css');
   const d = drawGeometry(region,view,{x:0,y:2000,right:499,bottom:2620},scale,0);
   assert.deepEqual(d,{sx:160,sy:80,sw:998,sh:1240,dx:0,dy:0,dw:499,dh:620});
+});
+
+test('vertical Region keeps horizontal selection in browser viewport coordinates', () => {
+  const view={innerWidth:1496,innerHeight:704,clientWidth:1100,clientHeight:704,height:27115,
+    viewportRect:{left:180,top:0}};
+  const selected=verticalRegionFromViewportEdges({left:200,right:1200,top:300,bottom:20300},view);
+  assert.deepEqual(selected,{x:0,y:300,width:1000,height:20000,cropLeft:200,cropRight:1200});
+  const scale=outputGeometry(selected,view,{width:1496,height:704},'auto');
+  const d=drawGeometry(selected,{x:0,y:300,innerWidth:1496,innerHeight:704,cropLeft:200,viewportRect:{left:180,top:0}},
+    {x:0,y:300,right:1000,bottom:1004},scale,0);
+  assert.equal(d.sx,200);
+  assert.equal(d.sw,1000);
+  assert.equal(d.dx,0);
+  assert.throws(()=>verticalRegionFromViewportEdges({left:100,right:1200,top:300,bottom:400},view));
 });

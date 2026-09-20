@@ -365,3 +365,11 @@ Deterministic tests must evaluate the frozen visual Scope, not require the final
 - Background must freeze `regionFromEdges(s.edges, s.viewport)`, never rebuild from `resolved.region` after PREPARE.
 - Full Page final Robust recovery: real trace `expected=272 / scoreCandidate=272 / agreement=.75 / best=.965` → `geometry-score`.
 - Unrelated low-score/low-agreement frame remains rejected; Strict remains verified-only.
+
+## Phase 2.3 targeted plan — 2026-09-20
+
+- nested target viewport left=180，用户横向选择 200–1200 → Region width=1000、cropLeft=200；
+- drawGeometry source x 必须是 200，而不是 20 或 180；
+- Region scroll 保持当前 horizontal scroll，只改变 y；
+- normalized Region view.x=0，visibleTile 不再规划横向第二列；
+- Full Page 不修改。

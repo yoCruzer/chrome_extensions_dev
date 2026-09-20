@@ -9,6 +9,16 @@ export function regionFromEdges({ left, top, right, bottom }, page) {
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
+export function verticalRegionFromViewportEdges({ left, top, right, bottom }, view) {
+  const minX = view.viewportRect?.left || 0;
+  const maxX = minX + view.clientWidth;
+  if (![left, top, right, bottom, minX, maxX].every(Number.isFinite) ||
+      left < minX || right > maxX || right <= left || top < 0 || bottom <= top || bottom > view.height) {
+    throw new Error("选区无效：横向边界必须位于当前可见区域内，纵向边界必须位于目标内容范围内。");
+  }
+  return { x: 0, y: top, width: right - left, height: bottom - top, cropLeft: left, cropRight: right };
+}
+
 // Round absolute boundaries, never the height of each successive tile.
 export const pixelEdge = (css, origin, scale) => Math.round((css - origin) * scale);
 
@@ -41,7 +51,7 @@ export function drawGeometry(region, view, rect, scale, partStart) {
   const y0 = pixelEdge(rect.y, region.y, scale.scaleY);
   const y1 = pixelEdge(rect.bottom, region.y, scale.scaleY);
   return {
-    sx: (rect.x - view.x + (view.viewportRect?.left || 0)) * (scale.sourceX ?? scale.scaleX),
+    sx: (rect.x - view.x + (view.cropLeft ?? view.viewportRect?.left ?? 0)) * (scale.sourceX ?? scale.scaleX),
     sy: (rect.y - view.y + (view.viewportRect?.top || 0)) * (scale.sourceY ?? scale.scaleY),
     sw: (rect.right - rect.x) * (scale.sourceX ?? scale.scaleX),
     sh: (rect.bottom - rect.y) * (scale.sourceY ?? scale.scaleY),

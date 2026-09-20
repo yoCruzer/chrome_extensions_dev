@@ -217,3 +217,12 @@ test('Region run freezes the original UI edges instead of rebuilding Scope from 
   assert.match(source,/s\.region = regionFromEdges\(s\.edges, s\.viewport\)/);
   assert.doesNotMatch(source,/left: resolved\.region\.x/);
 });
+
+test('Region relativeView normalizes horizontal output to zero while preserving viewport cropLeft', () => {
+  const s={mode:'region',region:{x:0,y:300,width:1000,height:20000},regionCropLeft:200};
+  const actual={x:20,y:1000,region:{x:0,y:300,width:1000,height:20000},viewportRect:{left:180,top:0},clientWidth:1100,clientHeight:704};
+  const normalized=validationContext.relativeView(s,actual);
+  assert.equal(normalized.x,0);
+  assert.equal(normalized.cropLeft,200);
+  assert.equal(normalized.y,1000);
+});
