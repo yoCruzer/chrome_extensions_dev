@@ -54,9 +54,8 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
   assert.equal(await page.evaluate(()=>scrollY),0);
   console.log('PASS visual',kind,JSON.stringify(v));
  }
-}
 
-// The same heavy-edge fixture must remain fail-closed in Strict.
+ // The same heavy-edge fixture must remain fail-closed in Strict.
  await page.setViewportSize({width:900,height:700});
  await page.goto(new URL('?kind=edge-heavy',page.url()).href);
  await capture('full','css','strict');
@@ -65,3 +64,4 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
  assert.equal(strictEdge.reasonCode,'VISUAL_CONTINUITY_FAILED');
  assert.equal(strictEdge.parts,0);
  console.log('PASS visual edge-heavy strict fail-closed');
+}
