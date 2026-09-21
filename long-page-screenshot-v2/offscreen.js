@@ -92,19 +92,24 @@ async function finalizePart() {
   const actualHeight = Math.min(session.canvas.height, Math.max(0, session.scale.height - session.start));
   if (actualHeight < 1) { releaseCanvas(); return; }
   let canvas = session.canvas;
-  if (actualHeight !== canvas.height) {
-    const cropped = new OffscreenCanvas(canvas.width, actualHeight);
-    const context = cropped.getContext("2d", { alpha: false });
-    if (!context) throw new Error("无法裁剪截图分片。");
-    context.drawImage(canvas, 0, 0);
-    canvas.width = canvas.height = 1;
-    canvas = cropped;
+  try {
+    if (actualHeight !== canvas.height) {
+      const cropped = new OffscreenCanvas(canvas.width, actualHeight);
+      canvas = cropped;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("无法裁剪截图分片。");
+      context.drawImage(session.canvas, 0, 0);
+      session.canvas.width = session.canvas.height = 1;
+    }
+    const width = canvas.width;
+    const blob = await canvas.convertToBlob({ type: "image/png" });
+    const url = URL.createObjectURL(blob);
+    session.parts.push({ url, start: session.start, width, height: actualHeight });
+  } finally {
+    if (canvas) canvas.width = canvas.height = 1;
+    if (session.canvas && session.canvas !== canvas) session.canvas.width = session.canvas.height = 1;
+    session.canvas = session.context = session.start = null;
   }
-  const blob = await canvas.convertToBlob({ type: "image/png" });
-  const url = URL.createObjectURL(blob);
-  session.parts.push({ url, start: session.start, width: canvas.width, height: actualHeight });
-  canvas.width = canvas.height = 1;
-  session.canvas = session.context = session.start = null;
 }
 
 async function drawIntoParts(bitmap, view, rect) {

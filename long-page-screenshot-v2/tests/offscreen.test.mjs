@@ -67,7 +67,7 @@ test("rolling renderer splits a long output into ordered bounded parts without l
   await drawRegion(h, 22000);
   const exported = await h.send("EXPORT");
   assert.equal(exported.ok, true);
-  assert.deepEqual(exported.parts.map(p => [p.start, p.width, p.height]), [
+  assert.deepEqual(Array.from(exported.parts, p => [p.start, p.width, p.height]), [
     [0, 720, 16384],
     [16384, 720, 3416]
   ]);

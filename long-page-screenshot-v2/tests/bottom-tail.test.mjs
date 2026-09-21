@@ -28,16 +28,26 @@ import { readFile } from 'node:fs/promises';
 import { VISUAL, overlapCSS } from '../capture/visual.js';
 const offscreen = (await readFile(new URL('../offscreen.js',import.meta.url),'utf8')).replace(/^import .*;\n/gm,'');
 for(const policy of ['robust','strict'])for(const result of ['failed','ambiguous','low-information','strict-coverage-failed','matched'])test(`offscreen ${policy} visual-first terminal ${result}`,async()=>{
- const draws=[];let closed=0;
+ const draws=[];let closed=0,urlId=0;
+ class Canvas{
+  constructor(w,h){this.width=w;this.height=h}
+  getContext(){const self=this;return{
+   drawImage(...a){if(self.width===900)draws.push(a.slice(1))},
+   getImageData:()=>({data:new Uint8Array(self.width*self.height*4)})
+  }}
+  async convertToBlob(){return{}}
+ }
  const context={assessBottomTail,VISUAL,overlapCSS,drawGeometry,
   matchVertical:()=>({result,matchedOffset:43,correction:-1}),
-  chrome:{runtime:{onMessage:{addListener(){}}}},addEventListener(){},
+  robustPlacement:()=>null,
+  chrome:{runtime:{id:'test',onMessage:{addListener(){}}}},addEventListener(){},
+  URL:{createObjectURL:()=>`blob:${++urlId}`,revokeObjectURL(){}},
   fetch:async()=>({blob:async()=>({})}),createImageBitmap:async()=>({width:900,height:912,close(){closed++}}),
-  OffscreenCanvas:class{constructor(w,h){this.w=w;this.h=h}getContext(){return{drawImage(){},getImageData:()=>({data:new Uint8Array(this.w*this.h*4)})}}}
+  OffscreenCanvas:Canvas
  };
  vm.runInNewContext(offscreen,context);
  context.draws=draws;
- vm.runInNewContext(`session={continuityPolicy:'${policy}',id:'a',bitmapWidth:900,bitmapHeight:912,region:{x:0,y:0,width:900,height:6428},scale:{sourceX:1,sourceY:1,scaleX:1,scaleY:1},context:{drawImage(...a){draws.push(a.slice(1))}},previous:{strip:{start:428},canonicalY:5472,documentY:5472,end:6384}}`,context);
+ vm.runInNewContext(`session={continuityPolicy:'${policy}',id:'a',bitmapWidth:900,bitmapHeight:912,region:{x:0,y:0,width:900,height:6428},scale:{sourceX:1,sourceY:1,scaleX:1,scaleY:1,width:900,height:6428,partHeight:6428,partCount:1},parts:[],canvas:null,context:null,start:null,previous:{strip:{start:428},canonicalY:5472,documentY:5472,end:6384}}`,context);
  const m={type:'FULL_FRAME',id:'a',x:0,firstColumn:true,uncertain:true,dataUrl:'fresh',view:{x:0,y:5516,height:6428,clientWidth:900,clientHeight:912,innerWidth:900,innerHeight:912}};
  if(result!=='matched'){
   const rejected=await context.handle(m);assert.equal(rejected.accepted,false);assert.equal(rejected.canonicalEnd,6384);assert.equal(draws.length,0);
@@ -88,15 +98,24 @@ test('terminal geometry tolerates at most 1 CSS px of extent/bottom jitter and e
 });
 
 test('offscreen terminal anchor clamps a fractional physical bottom to the authoritative final extent',async()=>{
- const draws=[];let closed=0;
+ const draws=[];let closed=0,urlId=0;
+ class Canvas{
+  constructor(w,h){this.width=w;this.height=h}
+  getContext(){const self=this;return{
+   drawImage(...a){if(self.width===900)draws.push(a.slice(1))},
+   getImageData:()=>({data:new Uint8Array(self.width*self.height*4)})
+  }}
+  async convertToBlob(){return{}}
+ }
  const context={assessBottomTail,VISUAL,overlapCSS,drawGeometry,
-  matchVertical:()=>({result:'failed',matchedOffset:null,correction:null}),
-  chrome:{runtime:{onMessage:{addListener(){}}}},addEventListener(){},
+  matchVertical:()=>({result:'failed',matchedOffset:null,correction:null}),robustPlacement:()=>null,
+  chrome:{runtime:{id:'test',onMessage:{addListener(){}}}},addEventListener(){},
+  URL:{createObjectURL:()=>`blob:${++urlId}`,revokeObjectURL(){}},
   fetch:async()=>({blob:async()=>({})}),createImageBitmap:async()=>({width:900,height:912,close(){closed++}}),
-  OffscreenCanvas:class{constructor(w,h){this.w=w;this.h=h}getContext(){return{drawImage(){},getImageData:()=>({data:new Uint8Array(this.w*this.h*4)})}}}
+  OffscreenCanvas:Canvas
  };
  vm.runInNewContext(offscreen,context);context.draws=draws;
- vm.runInNewContext(`session={continuityPolicy:'robust',id:'j',bitmapWidth:900,bitmapHeight:912,region:{x:0,y:0,width:900,height:6428},scale:{sourceX:1,sourceY:1,scaleX:1,scaleY:1},context:{drawImage(...a){draws.push(a.slice(1))}},previous:{strip:{start:428},canonicalY:5472,documentY:5472,end:6384}}`,context);
+ vm.runInNewContext(`session={continuityPolicy:'robust',id:'j',bitmapWidth:900,bitmapHeight:912,region:{x:0,y:0,width:900,height:6428},scale:{sourceX:1,sourceY:1,scaleX:1,scaleY:1,width:900,height:6428,partHeight:6428,partCount:1},parts:[],canvas:null,context:null,start:null,previous:{strip:{start:428},canonicalY:5472,documentY:5472,end:6384}}`,context);
  const result=await context.handle({type:'FULL_FRAME',id:'j',x:0,firstColumn:true,uncertain:true,dataUrl:'fresh',bottomExtent:6428,
   view:{x:0,y:5516.5,height:6429,clientWidth:900,clientHeight:912,innerWidth:900,innerHeight:912}});
  assert.equal(result.accepted,true);assert.equal(result.end,6428);assert.equal(result.bottomTail.remainingTail,44);

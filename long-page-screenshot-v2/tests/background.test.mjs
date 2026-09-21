@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { readFile } from "node:fs/promises";
-import { regionFromEdges, outputGeometry, sameViewport } from "../capture/geometry.js";
+import { regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, sameViewport } from "../capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "../capture/planner.js";
-import { bottomTail } from "../capture/bottom-tail.js";
+import { assessBottomTail, bottomTail, TERMINAL_GEOMETRY_EPSILON, terminalNear } from "../capture/bottom-tail.js";
 import { VISUAL, overlapCSS } from "../capture/visual.js";
 const source = (await readFile(new URL("../background.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
@@ -31,7 +31,7 @@ test("startup close failure does not poison ready; new job completes and reveals
     downloads: { download: async options => { assert.doesNotMatch(options.filename, /part-/); return 8; },
       search: async () => [{ id: 8, state: "complete", filename: "/custom/chosen/result.png", fileSize: 42 }], cancel: async () => {}, show: async id => { shown = id; } }
   };
-  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, VISUAL, overlapCSS, bottomTail, setTimeout, setInterval, clearInterval });
+  vm.runInNewContext(source, { chrome, crypto: { randomUUID: () => "new" }, regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, sameViewport, visibleTile, adaptiveEnd, MAX_STEPS, VISUAL, overlapCSS, assessBottomTail, bottomTail, TERMINAL_GEOMETRY_EPSILON, terminalNear, setTimeout, setInterval, clearInterval });
   const send = m => new Promise(resolve => listener({ target: "background", ...m }, { id: "test", url: "extension://popup.html" }, resolve));
   assert.equal((await send({ type: "STATUS" })).ok, true);
   assert.equal((await send({ type: "START", mode: "full" })).ok, true);
@@ -50,7 +50,8 @@ test("startup close failure does not poison ready; new job completes and reveals
 });
 
 const validation = source.slice(source.indexOf('function validateView'), source.indexOf('async function scroll'));
-const validationContext = { sameViewport, regionFromEdges };
+const validationContext = { sameViewport, regionFromEdges,
+  near: (a,b,epsilon=0.5) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a-b) <= epsilon };
 vm.runInNewContext(validation, validationContext);
 
 test('Region tolerates unrelated document dimensions but rejects only actual environment or region geometry changes', () => {
@@ -74,16 +75,17 @@ test('Region tolerates unrelated document dimensions but rejects only actual env
   assert.doesNotThrow(() => validationContext.validateView({ ...s, mode: 'full' }, moved));
 });
 
-test('rigid translation maps actual scroll coverage into the original canvas coordinates', () => {
-  const region = { x: 80, y: 40, width: 1100, height: 2400 };
-  const s = { mode: 'region', region };
-  const actual = { x: 480, y: 1620, clientWidth: 900, clientHeight: 700, region: { ...region, x: 140, y: 220 } };
+test('rigid vertical translation rebases y while Region horizontal output stays viewport-fixed', () => {
+  const region = { x: 0, y: 40, width: 800, height: 2400 };
+  const s = { mode: 'region', region, regionCropLeft: 200 };
+  const actual = { x: 480, y: 1620, clientWidth: 900, clientHeight: 700,
+    region: { ...region, x: 60, y: 220 } };
   const normalized = validationContext.relativeView(s, actual);
-  assert.equal(normalized.x, 420); assert.equal(normalized.y, 1440);
-  const tile = visibleTile(region, normalized, 980, 1440);
-  assert.equal(tile.right, 1180); assert.equal(tile.bottom, 2140);
-  // Sampling from the actual bitmap stays at the same local offset after rebase.
-  assert.equal(tile.x - normalized.x, (tile.x + 60) - actual.x);
+  assert.equal(normalized.x, 0);
+  assert.equal(normalized.y, 1440);
+  assert.equal(normalized.cropLeft, 200);
+  const tile = visibleTile(region, normalized, 0, 1440);
+  assert.equal(tile.right, 800); assert.equal(tile.bottom, 2140);
   assert.equal(tile.y - normalized.y, (tile.y + 180) - actual.y);
 });
 
@@ -152,7 +154,8 @@ test('Full Page is vertical-only and preserves the current horizontal slice thro
   const s = { full: { end: 1000 }, region: { x: 123, y: 0, width: 800, height: 1000 },
     metrics: { captures: 1 }, frames: 0, continuityPolicy: 'robust' };
   let rejects = 0;
-  const context = { VISUAL, overlapCSS, bottomTail, MAX_STEPS, bottomQuiescence: async () => true,
+  const context = { VISUAL, overlapCSS, assessBottomTail, bottomTail, TERMINAL_GEOMETRY_EPSILON, terminalNear, MAX_STEPS,
+    recordBottomTailReject: () => {}, bottomQuiescence: async () => true,
     scrollFullRecoverable: async (s, x, y) => {
       assert.equal(x, 123); const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current;
     },
@@ -215,8 +218,9 @@ test('Full Page Robust exposes strong probable-score on retry 1 and all fallback
   assert.doesNotMatch(source,/allowRobustFallback:/);
 });
 
-test('Region run freezes the original UI edges instead of rebuilding Scope from resolved anchors', () => {
-  assert.match(source,/s\.region = regionFromEdges\(s\.edges, s\.viewport\)/);
+test('Region run freezes original UI edges as viewport-x/content-y Scope instead of rebuilding from anchors', () => {
+  assert.match(source,/const selected = verticalRegionFromViewportEdges\(s\.edges, s\.viewport\)/);
+  assert.match(source,/s\.regionCropLeft = selected\.cropLeft/);
   assert.doesNotMatch(source,/left: resolved\.region\.x/);
 });
 

@@ -105,7 +105,7 @@ test('Robust geometry fallback is limited to non-contradictory ambiguity/low-inf
 test('Robust probable-score accepts coherent noisy alignment but still rejects unrelated images', () => {
   const basePattern=(x,y)=>((Math.imul(y+17,7321)^Math.imul(x+19,y+731))>>>0)%251;
   const noisyPattern=(x,y)=>basePattern(x,y)+(((x*17+y*13)%3)-1);
-  const noisy=matchVertical(frame(0,undefined,basePattern),frame(525,undefined,noisyPattern),525,false,'robust');
+  const noisy=matchVertical(frame(0,undefined,basePattern),frame(525,undefined,noisyPattern),525,false,'strict');
   assert.equal(noisy.result,'failed');
   assert.equal(noisy.failureReason,'insufficient-quality');
   assert.ok(noisy.scoreAgreeingTiles >= VISUAL.minTiles);
@@ -116,7 +116,7 @@ test('Robust probable-score accepts coherent noisy alignment but still rejects u
   assert.equal(placement.visual.placementOffset,525);
   assert.equal(placement.visual.continuity,'probable');
 
-  const unrelated=matchVertical(frame(0),frame(1800),525,false,'robust');
+  const unrelated=matchVertical(frame(0),frame(1800),525,false,'strict');
   assert.equal(unrelated.result,'failed');
   assert.equal(robustPlacement({canonicalY:1000,end:1700},525,unrelated,'robust'),null);
   assert.equal(robustPlacement({canonicalY:1000,end:1700},525,noisy,'strict'),null);
