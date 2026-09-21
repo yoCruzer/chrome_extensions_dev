@@ -411,6 +411,11 @@ function recordVisual(s, match, retry) {
   if (match.fallbackMethod === "probable-visual") d.probableVisualCorrections++;
   if (match.fallbackMethod === "probable-score") d.probableScoreCorrections++;
   if (match.fallbackMethod === "geometry-score") d.geometryScoreFallbacks++;
+  if (match.matchMode === "subject-core") {
+    d.subjectCorePlacements++;
+    if (match.volatileEdges?.includes("left")) d.leftEdgeVolatileFrames++;
+    if (match.volatileEdges?.includes("right")) d.rightEdgeVolatileFrames++;
+  }
   if (match.failureReason === "insufficient-quality") d.insufficientQualityRejects++;
   if (["width-mismatch", "insufficient-overlap"].includes(match.failureReason)) d.structuralVisualRejects++;
   if (retry) d.visualRecoveryRetries++;
@@ -429,7 +434,8 @@ async function captureFull(s, view, dataUrl) {
   s.full.visual ||= { continuityPolicy: s.continuityPolicy, strictCoverageChecks: 0, strictCoverageFailures: 0, visualChecks: 0, visualFastPath: 0, visualRecoveries: 0,
     visualRecoveryRetries: 0, visualFailures: 0, ambiguousMatches: 0, lowInformationRejects: 0,
     probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0, probableScoreCorrections: 0,
-    geometryScoreFallbacks: 0, insufficientQualityRejects: 0, structuralVisualRejects: 0,
+    geometryScoreFallbacks: 0, subjectCorePlacements: 0, leftEdgeVolatileFrames: 0, rightEdgeVolatileFrames: 0,
+    insufficientQualityRejects: 0, structuralVisualRejects: 0,
     bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
   let documentBottom = 0, nextY = 0;
   const x = s.region.x;

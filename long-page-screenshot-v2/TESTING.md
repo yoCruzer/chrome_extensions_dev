@@ -397,3 +397,16 @@ Deterministic tests must evaluate the frozen visual Scope, not require the final
 4. resource cleanup：成功 final release、encode failure、pagehide 都释放 canvas/URLs，并允许新 session。
 5. save：多 part 使用顺序 suffix；结果记录真实 Chrome 下载路径。
 6. OUTPUT_ONLY 浏览器回归：短 Region Auto 变为 90%；26000px Full Page 的 CSS 与 Auto 均成功多图；极端高度仅在超过 24 parts 时预检失败。
+
+## Phase 4 targeted plan — 2026-09-21
+
+范围只限 Full Page visual evidence policy；不修改 Phase 3 multi-part renderer、Region、warm-up、CaptureTarget 或 manifest。
+
+定向门禁：
+
+1. Node matcher：左右 edge 共 5/12 tiles 变化，使 full-width quality agreement <0.6；Robust 由 center subject-core（≥2/3）接受，Strict 不接受。
+2. unrelated frame：center 不能形成 subject-core，仍失败。
+3. browser `edge-heavy` fixture：Robust 输出完整 PNG，中央 300–750px 每行与 immutable reference 一致；diagnostics 必须出现 subject-core + left/right volatile counters。
+4. 同 fixture Strict：`VISUAL_CONTINUITY_FAILED`、零 PNG。
+5. 原 static/github/sidebar/ad/islands/global/transient/ambiguous/low/unrelated 场景语义保持不变。
+6. Phase 3 output 代码不在本阶段 diff 中。

@@ -157,3 +157,26 @@ test('Final Robust recovery uses geometry-score when low-quality majority still 
   assert.equal(robustPlacement({canonicalY:1000,end:1704},272,unrelated,'robust','all'),null);
   assert.equal(robustPlacement({canonicalY:1000,end:1704},272,trace,'strict','all'),null);
 });
+
+test('Robust subject-core accepts a stable center when volatile edges defeat full-width majority', () => {
+  const mutate=(x,y)=>(x<40||x>=100)?(y*19+x*7)%255:null;
+  const robust=matchVertical(frame(0),frame(525,mutate),525,false,'robust');
+  assert.equal(robust.result,'matched',JSON.stringify(robust));
+  assert.equal(robust.continuity,'probable');
+  assert.equal(robust.matchMode,'subject-core');
+  assert.equal(robust.matchedOffset,525);
+  assert.ok(robust.agreementRatio < VISUAL.agreement);
+  assert.ok(robust.subjectCore.agreementRatio >= VISUAL.subjectCoreAgreement);
+  assert.ok(robust.volatileEdges.includes('left'));
+  assert.ok(robust.volatileEdges.includes('right'));
+  assert.equal(robust.zoneEvidence.center.qualityCandidateOffset,525);
+
+  const strict=matchVertical(frame(0),frame(525,mutate),525,false,'strict');
+  assert.notEqual(strict.result,'matched');
+});
+
+test('Robust subject-core does not rescue an unrelated center', () => {
+  const unrelated=matchVertical(frame(0),frame(1800),525,false,'robust');
+  assert.notEqual(unrelated.result,'matched');
+  assert.equal(unrelated.subjectCore,null);
+});

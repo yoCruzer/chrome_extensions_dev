@@ -293,3 +293,16 @@ Phase 3 将“清晰度选择”和“单个 canvas 的安全上限”彻底分�
 - Full Page adaptive growth 只更新 total height / partCount；不会在中途改变 scale。
 - 面板列出全部真实 `DownloadItem.filename`。Finder 按钮暂定位第一张；多 part 通常位于用户在连续保存对话框中选择的同一目录。
 
+## Phase 4 — Robust subject-core / volatile-edge tolerance
+
+真实页面验证表明：同一 Full Page 在左侧边栏展开时可能于中后段视觉连续性失败，关闭边栏后成功。Phase 4 不添加站点 selector，也不识别 GitHub DOM；它只重新定义 Robust 的视觉证据优先级。
+
+- 仍先运行原有 full-width matcher；达到 ≥60% 全宽共识时行为完全不变。
+- 只有 full-width 共识不足时，Robust 的**中心 50%（tiles 3–8 / 12）**作为 subject core 做第二层判断。
+- subject core 若有至少 3 个 informative/agreeing tiles 且局部共识 ≥2/3，可用高质量 vote 的 offset；若 strict quality 不足，则 raw-score 必须 ≥2/3 同意 observed expectedOffset（±1px）且 score ≥0.75。
+- subject-core 成功记录 `continuity=probable / matchMode=subject-core / fallbackMethod=subject-core`，不会冒充 full-width verified。
+- 左右各 25% 只在 subject-core 已成立后允许标记为 `volatileEdges`；中心自己不稳定时不会被边缘策略掩盖。
+- Strict 完全不使用 subject-core，仍要求原 full-width + left/center/right zone 规则。
+- diagnostics trace 新增 `zoneEvidence.left/center/right`、`subjectCore`、`volatileEdges`；汇总新增 `subjectCorePlacements / leftEdgeVolatileFrames / rightEdgeVolatileFrames`。
+
+新增确定性 `edge-heavy` fixture：左侧 300px + 右侧 150px 在滚动后变化，中央 450px 主体保持稳定。Robust 必须完成并逐行验证中央像素；Strict 对同页必须失败且无 PNG。
