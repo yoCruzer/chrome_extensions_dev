@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { outputGeometry, drawGeometry } from "../capture/geometry.js";
+import { assessBottomTail } from "../capture/bottom-tail.js";
+import { VISUAL, overlapCSS } from "../capture/visual.js";
+import { robustPlacement, matchVertical } from "../capture/visual.js";
+import { bottomTail } from "../capture/bottom-tail.js";
 
 const source = (await readFile(new URL("../offscreen.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
@@ -15,7 +19,7 @@ function harness() {
     async convertToBlob() { if (failEncode) throw new Error("encode failed"); return { width: this.width, height: this.height }; }
   }
   vm.runInNewContext(source, {
-    outputGeometry, drawGeometry, OffscreenCanvas: Canvas,
+    outputGeometry, drawGeometry, assessBottomTail, bottomTail, VISUAL, overlapCSS, robustPlacement, matchVertical, OffscreenCanvas: Canvas,
     chrome: { runtime: { id: "test", onMessage: { addListener(fn) { listener = fn; } } } },
     addEventListener(type, fn) { if (type === "pagehide") pagehide = fn; },
     URL: { createObjectURL() { const url = `blob:${++nextURL}`; urls.add(url); return url; }, revokeObjectURL(url) { urls.delete(url); } },

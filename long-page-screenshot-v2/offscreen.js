@@ -1,6 +1,6 @@
 import { outputGeometry, drawGeometry } from "./capture/geometry.js";
 import { VISUAL, overlapCSS, matchVertical, robustPlacement } from "./capture/visual.js";
-import { bottomTail } from "./capture/bottom-tail.js";
+import { assessBottomTail } from "./capture/bottom-tail.js";
 
 let session;
 let queue = Promise.resolve();
@@ -159,7 +159,7 @@ async function handle(m) {
     const bitmap = await decode(m.dataUrl);
     try {
       if (bitmap.width !== session.bitmapWidth || bitmap.height !== session.bitmapHeight) throw new Error("截图尺寸已变化，请保持窗口和缩放不变。");
-      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual, anchored, fallback;
+      let canonicalY = m.canonicalY ?? 0, novelTop = m.novelTop ?? 0, visual, anchored, fallback, tailDecision;
       if (m.firstColumn && session.previous) {
         const expected = m.view.y - session.previous.documentY;
         const current = strip(bitmap, m.view, false, session.previous.strip.start - Math.max(1, expected - VISUAL.radius));
@@ -168,11 +168,15 @@ async function handle(m) {
           visual = { ...matchVertical(session.previous.strip, current, expected, false, session.continuityPolicy), path: 'recovery' };
         } else visual.path = 'fast';
         if (visual.result !== 'matched') {
-          anchored = session.continuityPolicy !== "strict" && m.bottomExtent !== undefined && bottomTail(m.view, session.previous.end, m.bottomExtent);
+          if (session.continuityPolicy !== "strict" && m.bottomExtent !== undefined) {
+            tailDecision = assessBottomTail(m.view, session.previous.end, m.bottomExtent);
+            anchored = tailDecision.anchor;
+          }
           fallback = !anchored && m.robustFallbackMode
             ? robustPlacement(session.previous, expected, visual, session.continuityPolicy, m.robustFallbackMode)
             : null;
-          if (!anchored && !fallback) return { accepted: false, visual, canonicalEnd: session.previous.end };
+          if (!anchored && !fallback) return { accepted: false, visual, canonicalEnd: session.previous.end,
+            ...(tailDecision && !tailDecision.anchor ? { bottomTailReject: { reason: tailDecision.reason, details: tailDecision.details } } : {}) };
         }
         if (fallback) {
           canonicalY = fallback.canonicalY;
@@ -183,8 +187,8 @@ async function handle(m) {
           novelTop = session.previous.end;
         }
       }
-      const localBottom = Math.min(m.view.clientHeight, m.view.height - m.view.y);
-      const end = canonicalY + localBottom;
+      const localBottom = anchored ? anchored.viewportHeight : Math.min(m.view.clientHeight, m.view.height - m.view.y);
+      const end = anchored ? anchored.finalExtent : canonicalY + localBottom;
       if (end <= novelTop || canonicalY > novelTop + 0.01) return { accepted: false, visual: { ...visual, result: 'failed' } };
       if (end > session.region.height) updateGeometry(end);
       const rect = { x: session.region.x, right: session.region.x + session.region.width, y: novelTop, bottom: end };

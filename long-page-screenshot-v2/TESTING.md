@@ -410,3 +410,16 @@ Deterministic tests must evaluate the frozen visual Scope, not require the final
 4. 同 fixture Strict：`VISUAL_CONTINUITY_FAILED`、零 PNG。
 5. 原 static/github/sidebar/ad/islands/global/transient/ambiguous/low/unrelated 场景语义保持不变。
 6. Phase 3 output 代码不在本阶段 diff 中。
+
+## Phase 4.1 targeted plan — 2026-09-21
+
+范围只限 terminal bottom-tail authorization / diagnostics；不修改 normal matcher、Phase 4 subject-core、Phase 3 renderer、Region 或 manifest。
+
+定向门禁：
+
+1. `assessBottomTail`: observed height +1px、visible bottom +0.5px 仍可对 authoritative extent 建立 44px tail；>1px extent/bottom drift 明确拒绝并给 reason。
+2. existing 1/44/228px mapping 与 320px hard cap 不变。
+3. offscreen fractional terminal view 最终 end 必须精确等于 finalExtent，draw 只写 novel rows。
+4. quiescence: ±1px terminal height/y jitter 连续四次可稳定；真实 >1px growth、明显移动、pending translation 仍撤销 anchor。
+5. reject diagnostics 要按 reason 计数并保留最近 30 条，不记录正文/DOM dump。
+6. Strict terminal behavior 不变；normal Full Page/Region/Multipart 不在本阶段 diff。

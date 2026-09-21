@@ -1,7 +1,7 @@
 import { regionFromEdges, verticalRegionFromViewportEdges, outputGeometry, sameViewport } from "./capture/geometry.js";
 import { visibleTile, adaptiveEnd, MAX_STEPS } from "./capture/planner.js";
 import { VISUAL, overlapCSS } from "./capture/visual.js";
-import { bottomTail } from "./capture/bottom-tail.js";
+import { assessBottomTail, TERMINAL_GEOMETRY_EPSILON, terminalNear } from "./capture/bottom-tail.js";
 
 let active = null;
 let lastStatus = { state: "idle", message: "准备就绪" };
@@ -339,7 +339,7 @@ async function captureOnce(s, view) {
     const after = await request(s, "content", "MEASURE");
     validateView(s, after);
     if (s.mode === "full") {
-      s.captureExtentStable = fullBefore.height === view.height && after.height === view.height;
+      s.captureExtentStable = terminalNear(fullBefore.height, view.height) && terminalNear(after.height, view.height);
       await extendEnd(s, after);
     }
     if (s.mode === "region") {
@@ -366,6 +366,10 @@ async function captureOnce(s, view) {
 }
 
 async function extendEnd(s, view) {
+  if (Number.isFinite(s.terminalExtent) && terminalNear(view.height, s.terminalExtent)) {
+    s.full.maxObservedHeight = Math.max(s.full.maxObservedHeight, view.height);
+    return;
+  }
   if (!s.frames && !s.offscreen && view.height < s.full.end) {
     s.full.end = view.height;
     s.region = { ...s.region, height: view.height };
@@ -376,8 +380,10 @@ async function extendEnd(s, view) {
   if (s.offscreen) s.outputSize = await request(s, "offscreen", "EXTEND", { region: s.region });
 }
 
-async function bottomQuiescence(s, anchorView) {
+async function bottomQuiescence(s, anchorView, report) {
   // Four stable 200ms observations; visible lazy images must also be ready.
+  // Terminal checks tolerate <=1 CSS px measurement jitter only when an
+  // anchorView is supplied; ordinary bottom discovery keeps existing behavior.
   const started = Date.now();
   s.full.bottomStableSamples = 0;
   while (Date.now() - started < 3000) {
@@ -387,17 +393,47 @@ async function bottomQuiescence(s, anchorView) {
       if (anchorView && error.translation) return null;
       throw error;
     });
-    if (!view) return false;
+    if (!view) {
+      if (report) Object.assign(report, { reason: "quiescence-translation" });
+      return false;
+    }
     validateView(s, view);
     const previous = s.full.end;
     await extendEnd(s, view);
-    if (s.full.end > previous) return false;
-    if (anchorView && (view.height !== anchorView.height || view.y !== anchorView.y ||
-        Math.abs(view.y + view.clientHeight - view.height) > 0.01)) return false;
+    if (s.full.end > previous) {
+      if (report) Object.assign(report, { reason: "quiescence-growth", previousExtent: previous, observedExtent: s.full.end });
+      return false;
+    }
+    if (anchorView) {
+      const targetExtent = Number.isFinite(s.terminalExtent) ? s.terminalExtent : s.full.end;
+      if (!terminalNear(view.height, anchorView.height) ||
+          !terminalNear(view.y, anchorView.y) ||
+          !terminalNear(view.y + view.clientHeight, targetExtent)) {
+        if (report) Object.assign(report, {
+          reason: "quiescence-drift",
+          targetExtent,
+          observedHeight: view.height,
+          anchorHeight: anchorView.height,
+          observedY: view.y,
+          anchorY: anchorView.y,
+          visibleBottom: view.y + view.clientHeight,
+          epsilon: TERMINAL_GEOMETRY_EPSILON
+        });
+        return false;
+      }
+    }
     s.full.bottomStableSamples = view.loading ? 0 : s.full.bottomStableSamples + 1;
     if (s.full.bottomStableSamples >= 4) return true;
   }
   throw Object.assign(new Error("页面底部仍在加载，请稍后重试或改用选择区域。"), { reasonCode: "BOTTOM_NOT_QUIESCENT" });
+}
+
+function recordBottomTailReject(s, reason, details = {}, retry = 0) {
+  if (!reason) return;
+  const d = s.full.visual;
+  d.bottomTailRejectReasons[reason] = (d.bottomTailRejectReasons[reason] || 0) + 1;
+  d.bottomTailRejectTrace.push({ reason, frame: s.frames, retry, ...details });
+  if (d.bottomTailRejectTrace.length > 30) d.bottomTailRejectTrace.shift();
 }
 
 function recordVisual(s, match, retry) {
@@ -436,7 +472,8 @@ async function captureFull(s, view, dataUrl) {
     probablePlacements: 0, geometryFallbacks: 0, probableVisualCorrections: 0, probableScoreCorrections: 0,
     geometryScoreFallbacks: 0, subjectCorePlacements: 0, leftEdgeVolatileFrames: 0, rightEdgeVolatileFrames: 0,
     insufficientQualityRejects: 0, structuralVisualRejects: 0,
-    bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0, trace: [] };
+    bottomTailChecks: 0, bottomTailAccepted: 0, bottomTailRejected: 0,
+    bottomTailRejectReasons: {}, bottomTailRejectTrace: [], trace: [] };
   let documentBottom = 0, nextY = 0;
   const x = s.region.x;
   while (true) {
@@ -463,26 +500,69 @@ async function captureFull(s, view, dataUrl) {
           const d = s.full.visual;
           d.bottomTailChecks++;
           d.bottomTailRejected++;
-          const anchor = bottomTail(view, result.canonicalEnd, s.full.end);
-          if (anchor && await bottomQuiescence(s, view)) {
-            // The rejected bitmap predates quiescence. Capture again, and let
-            // visual registration win before authorizing the terminal anchor.
-            const stableExtent = s.full.end;
-            if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
-            view = await scrollFullRecoverable(s, x, view.y);
-            await extendEnd(s, view);
-            ({ view, dataUrl } = await capture(s, view));
-            const after = await request(s, "content", "BOTTOM").catch(error => {
-              if (error.translation) return null;
-              throw error;
-            });
-            if (after) { validateView(s, after); await extendEnd(s, after); }
-            const stable = s.captureExtentStable && s.full.end === stableExtent && after && !after.loading &&
-              after.height === view.height && after.y === view.y && after.x === view.x;
-            result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x, firstColumn: true,
-              uncertain: true, bottomExtent: stable ? stableExtent : undefined });
-            dataUrl = null;
-            recordVisual(s, result.visual, retry);
+          let rejectRecorded = false;
+          const reject = (reason, details = {}) => {
+            if (rejectRecorded) return;
+            rejectRecorded = true;
+            recordBottomTailReject(s, reason, details, retry);
+          };
+          const decision = assessBottomTail(view, result.canonicalEnd, s.full.end);
+          if (!decision.anchor) {
+            reject(decision.reason, decision.details);
+          } else {
+            const quiescence = {};
+            s.terminalExtent = s.full.end;
+            try {
+              if (await bottomQuiescence(s, view, quiescence)) {
+                const stableExtent = s.full.end;
+                const confirmed = assessBottomTail(view, result.canonicalEnd, stableExtent);
+                if (!confirmed.anchor) {
+                  reject("post-quiescence-" + confirmed.reason, confirmed.details);
+                } else {
+                  // The rejected bitmap predates quiescence. Capture again, and
+                  // let visual registration win before authorizing the tail.
+                  if (s.metrics.captures >= MAX_STEPS) throw new Error("截图超过 1000 帧，请缩小选区。");
+                  view = await scrollFullRecoverable(s, x, view.y);
+                  await extendEnd(s, view);
+                  ({ view, dataUrl } = await capture(s, view));
+                  const after = await request(s, "content", "BOTTOM").catch(error => {
+                    if (error.translation) return null;
+                    throw error;
+                  });
+                  if (after) { validateView(s, after); await extendEnd(s, after); }
+                  const freshDecision = assessBottomTail(view, result.canonicalEnd, stableExtent);
+                  const afterDecision = after ? assessBottomTail(after, result.canonicalEnd, stableExtent)
+                    : { anchor: null, reason: "post-capture-translation", details: {} };
+                  const stable = s.captureExtentStable && s.full.end === stableExtent && after && !after.loading &&
+                    terminalNear(after.height, view.height) && terminalNear(after.y, view.y) && after.x === view.x &&
+                    !!freshDecision.anchor && !!afterDecision.anchor;
+                  if (!stable) {
+                    reject("fresh-capture-unstable", {
+                      stableExtent,
+                      captureExtentStable: s.captureExtentStable,
+                      freshReason: freshDecision.reason,
+                      afterReason: afterDecision.reason,
+                      viewHeight: view.height,
+                      afterHeight: after?.height,
+                      viewY: view.y,
+                      afterY: after?.y,
+                      visibleBottom: after ? after.y + after.clientHeight : null,
+                      epsilon: TERMINAL_GEOMETRY_EPSILON
+                    });
+                  }
+                  result = await request(s, "offscreen", "FULL_FRAME", { view, dataUrl, x, firstColumn: true,
+                    uncertain: true, bottomExtent: stable ? stableExtent : undefined });
+                  dataUrl = null;
+                  recordVisual(s, result.visual, retry);
+                  if (result.bottomTailReject) reject("offscreen-" + result.bottomTailReject.reason, result.bottomTailReject.details);
+                  if (result.accepted && !result.bottomTail && !rejectRecorded) reject("visual-recovered", { stableExtent });
+                }
+              } else {
+                reject(quiescence.reason || "quiescence-rejected", quiescence);
+              }
+            } finally {
+              delete s.terminalExtent;
+            }
           }
           if (result.bottomTail) {
             d.bottomTailAccepted++;

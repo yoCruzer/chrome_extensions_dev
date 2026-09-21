@@ -306,3 +306,18 @@ Phase 3 将“清晰度选择”和“单个 canvas 的安全上限”彻底分�
 - diagnostics trace 新增 `zoneEvidence.left/center/right`、`subjectCore`、`volatileEdges`；汇总新增 `subjectCorePlacements / leftEdgeVolatileFrames / rightEdgeVolatileFrames`。
 
 新增确定性 `edge-heavy` fixture：左侧 300px + 右侧 150px 在滚动后变化，中央 450px 主体保持稳定。Robust 必须完成并逐行验证中央像素；Strict 对同页必须失败且无 PNG。
+
+## Phase 4.1 — Terminal Geometry Tolerance
+
+真实失败诊断显示一轮 Full Page 已提交到 27440 / 27460，只剩约 20px；normal matcher 在最后 tail 因低信息失败，而 terminal fallback 的旧条件仍要求高度/滚动底边精确相等（0.01px），无法容忍 element scrollTop 的 0.5px 与 1px extent jitter。
+
+Phase 4.1 只修改 terminal authorization：
+
+- `TERMINAL_GEOMETRY_EPSILON = 1 CSS px`；普通帧、subject-core、Strict 和 Region 不使用该 tolerance。
+- `assessBottomTail()` 保持当前 `s.full.end` 为 authoritative final extent；observed height / visible bottom 与它相差 ≤1px 只视为测量 jitter，不自动扩大或缩小输出。
+- terminal quiescence 的 height / y / physical-bottom 比较使用同一 1px tolerance；>1px 的真实增长仍走 adaptive extension 并撤销本次 anchor。
+- fresh bitmap 前后也使用同一 terminal tolerance；正常 capture 的位置保护不放宽。
+- offscreen anchored tail 的最终 `end` 明确 clamp 到 authoritative `finalExtent`，避免 fractional `scrollTop` 留下 0.5px 尾差。
+- 新 diagnostics：`bottomTailRejectReasons` 与最多 30 条 `bottomTailRejectTrace`，区分 `extent-mismatch / not-physical-bottom / tail-too-large / no-novel-tail / quiescence-* / fresh-capture-unstable / offscreen-*` 等原因。
+
+这条路径仍要求 remaining tail >0 且 ≤ min(320, overlap)、四次 quiescence、visible images ready、fresh capture；Strict 仍不使用 terminal anchor。
