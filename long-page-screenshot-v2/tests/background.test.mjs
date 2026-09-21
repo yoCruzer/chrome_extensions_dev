@@ -155,6 +155,7 @@ test('Full Page is vertical-only and preserves the current horizontal slice thro
     metrics: { captures: 1 }, frames: 0, continuityPolicy: 'robust' };
   let rejects = 0;
   const context = { VISUAL, overlapCSS, assessBottomTail, bottomTail, TERMINAL_GEOMETRY_EPSILON, terminalNear, MAX_STEPS,
+    recoveryBacktrackCSS: height => Math.min(Math.max(0, height - 32), 2 * VISUAL.radius + VISUAL.rows),
     recordBottomTailReject: () => {}, bottomQuiescence: async () => true,
     scrollFullRecoverable: async (s, x, y) => {
       assert.equal(x, 123); const current = { ...view, x, y: Math.min(400, y) }; moves.push(current); return current;
