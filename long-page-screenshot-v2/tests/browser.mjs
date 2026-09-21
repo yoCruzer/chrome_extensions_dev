@@ -271,20 +271,15 @@ try {
   assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.getElementById("fixed").style.visibility]), [123, 321, ""]);
   console.log("PASS full: current 900px horizontal slice, exact vertical rows, bottom and page restoration");
 
-  await capture("region", "css");
-  await page.screenshot({ path: join(root, "selection.png") });
-  // Exercise both picker buttons across a scroll, including the closed Shadow DOM UI.
-  await page.mouse.click(642, 245);
-  await page.mouse.click(107, 392);
-  await page.evaluate(() => scrollTo({ left: 0, top: 2500, behavior: "instant" }));
-  await page.mouse.click(730, 245);
-  await page.mouse.click(870, 369);
-  await page.mouse.click(811, 245);
+  const regionJob = await capture("region", "css");
+  // Base regression verifies the Phase 2.3 coordinate contract directly:
+  // horizontal edges are browser-viewport x; vertical edges are content y.
+  await selectRegion(regionJob, { left: 107, top: 713, right: 870, bottom: 2869 });
   const region = await waitFor(s => !s.busy);
   assert.equal(region.state, "complete", JSON.stringify(region));
   const [regionFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
   const png = PNG.sync.read(await readFile(regionFile.filename));
-  assert.equal(png.width, 640); assert.equal(png.height, 2156);
+  assert.equal(png.width, 763); assert.equal(png.height, 2156);
   for (let y = 0; y < png.height; y++) {
     const offset = y * png.width * 4;
     assert.deepEqual([...png.data.subarray(offset, offset + 3)], [(y + 713) % 251, Math.floor((y + 713) / 251), 97]);
