@@ -42,12 +42,16 @@ jobs:
     timeout-minutes: 120
     env:
       CI: "true"
-      REGRESSION_LOG_DIR: ${{ runner.temp }}/long-page-screenshot-v2-final
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v7
         with:
           node-version: "24.21.0"
+
+      - name: Prepare regression log directory
+        shell: bash
+        run: |
+          echo "REGRESSION_LOG_DIR=$RUNNER_TEMP/long-page-screenshot-v2-final" >> "$GITHUB_ENV"
 
       - name: Install isolated test dependencies
         shell: bash
