@@ -93,10 +93,19 @@ ADAPTIVE_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 PROOF_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 FULL_NESTED_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 DIAGNOSTICS_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+POLICY_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 ```
 
 测试需要 Node 22+，Chrome 集成另需 Playwright 和 pngjs；可通过 `NODE_PATH` 和 `CHROME_EXECUTABLE` 指定。使用临时配置及下载目录，正式 manifest 不增加主机权限；通过真实扩展 `captureVisibleTab`、offscreen 和 downloads 验证，不以自动化截图替代截图引擎。
+
+阶段结束前的完整回归可用一条命令执行：
+
+```sh
+bash long-page-screenshot-v2/tests/final-regression.sh
+```
+
+脚本要求 clean working tree，自动记录 branch/HEAD/Node/Chrome，并串行执行 Node 全量和 15 个 Chrome 分组；每组日志写入系统临时目录，首个失败即停止，避免手工漏跑或重复跑完整矩阵。
 
 本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。新增动态 fixture：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，以完整参考像素验证动态 banner、一次 resize 及重复 reflow。`test-csdn-like-page.html` 和 `test-chat-like-page.html` 分别复现 scrollbar／动态文章和 flex/grid 聊天布局中的两类误报。详见 [TESTING.md](TESTING.md)。
 
