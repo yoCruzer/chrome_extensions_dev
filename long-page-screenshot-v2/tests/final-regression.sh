@@ -28,7 +28,12 @@ if ! node -e "require.resolve('playwright'); require.resolve('pngjs')" >/dev/nul
   exit 2
 fi
 
-LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/long-page-screenshot-v2-final-XXXXXX")"
+if [[ -n "${REGRESSION_LOG_DIR:-}" ]]; then
+  LOG_DIR="$REGRESSION_LOG_DIR"
+  mkdir -p "$LOG_DIR"
+else
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/long-page-screenshot-v2-final-XXXXXX")"
+fi
 SUMMARY="$LOG_DIR/summary.txt"
 : > "$SUMMARY"
 

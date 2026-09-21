@@ -107,6 +107,15 @@ bash long-page-screenshot-v2/tests/final-regression.sh
 
 脚本要求 clean working tree，自动记录 branch/HEAD/Node/Chrome，并串行执行 Node 全量和 15 个 Chrome 分组；每组日志写入系统临时目录，首个失败即停止，避免手工漏跑或重复跑完整矩阵。
 
+### GitHub Actions CI
+
+仓库的 `.github/workflows/long-page-screenshot-v2-ci.yml` 复用同一测试入口：
+
+- 普通 PR 更新只跑 Node 单测，避免每个开发提交都触发昂贵的完整浏览器矩阵；
+- `workflow_dispatch`、PR 标记 Ready、以及 `main` 更新时运行完整 `final-regression.sh`；
+- CI 固定 Node 24.21.0，并在 runner 临时目录安装固定版本的 Playwright / pngjs 与 Chromium；
+- 成功或失败都会上传 regression logs artifact。Linux/Chromium CI 是自动回归证据，不能替代最终 Mac Chrome + 真实页面人工验收。
+
 本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。新增动态 fixture：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，以完整参考像素验证动态 banner、一次 resize 及重复 reflow。`test-csdn-like-page.html` 和 `test-chat-like-page.html` 分别复现 scrollbar／动态文章和 flex/grid 聊天布局中的两类误报。详见 [TESTING.md](TESTING.md)。
 
 API 依据：[Tabs](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Offscreen](https://developer.chrome.com/docs/extensions/reference/api/offscreen)、[Downloads](https://developer.chrome.com/docs/extensions/reference/api/downloads)。

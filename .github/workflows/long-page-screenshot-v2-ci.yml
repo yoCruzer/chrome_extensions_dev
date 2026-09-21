@@ -1,0 +1,73 @@
+name: Long Screenshot V2 CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "long-page-screenshot-v2/**"
+      - ".github/workflows/long-page-screenshot-v2-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "long-page-screenshot-v2/**"
+      - ".github/workflows/long-page-screenshot-v2-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: long-screenshot-v2-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node unit tests
+    if: github.event_name == 'pull_request' && github.event.action != 'ready_for_review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+      - name: Run Node tests
+        run: node --test long-page-screenshot-v2/tests/*.test.mjs
+
+  full-regression:
+    name: Full Chrome regression
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CI: "true"
+      REGRESSION_LOG_DIR: ${{ runner.temp }}/long-page-screenshot-v2-final
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+
+      - name: Install isolated test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS_DIR="$RUNNER_TEMP/long-page-screenshot-test-deps"
+          npm install --prefix "$DEPS_DIR" playwright@1.63.0 pngjs@7.0.0
+          echo "NODE_PATH=$DEPS_DIR/node_modules" >> "$GITHUB_ENV"
+          "$DEPS_DIR/node_modules/.bin/playwright" install --with-deps chromium
+          export NODE_PATH="$DEPS_DIR/node_modules"
+          echo "CHROME_EXECUTABLE=$(node -e "const { chromium } = require('playwright'); process.stdout.write(chromium.executablePath())")" >> "$GITHUB_ENV"
+
+      - name: Run final regression
+        run: bash long-page-screenshot-v2/tests/final-regression.sh
+
+      - name: Upload regression logs
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: long-page-screenshot-v2-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/long-page-screenshot-v2-final/
+          if-no-files-found: warn
+          retention-days: 14
