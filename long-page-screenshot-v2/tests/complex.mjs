@@ -26,7 +26,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   const before = await styles();
   const position = [0, 0];
   const since = await downloadIds();
-  await capture('full');
+  await capture('full','css');
   await waitFor(s => s.state === 'loading');
   assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('fixed-header')).visibility), 'hidden');
   assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('sticky-sidebar')).position), 'relative');
@@ -53,7 +53,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
 
   const edges = await regionEdges();
   const regionSince = await downloadIds();
-  await capture('region');
+  await capture('region','css');
   await page.screenshot({ path: join(root, 'complex-selection.png') });
   // Use the actual closed-shadow selection UI across a long scroll.
   await page.mouse.click(642, 245);
@@ -77,7 +77,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
 
   // Numeric submission deliberately keeps coordinate semantics; global growth
   // before preparation is allowed when the requested rectangle remains valid.
-  const stale = await capture('region');
+  const stale = await capture('region','css');
   const oldEdges = await regionEdges();
   await page.evaluate(() => document.getElementById('grow').click());
   await selectRegion(stale, oldEdges);
@@ -89,7 +89,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   console.log('PASS numeric fallback retains requested coordinates after outside document growth');
 
   // Shrinking the page invalidates a selected bottom edge.
-  const shrinking = await capture('region');
+  const shrinking = await capture('region','css');
   const shrinkEdges = await regionEdges();
   await page.evaluate(() => document.getElementById('section-18').remove());
   assert.match((await selectRegion(shrinking, shrinkEdges, false)).error, /选区无效/);
@@ -97,7 +97,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   await assertRestored(before, position);
 
   // Numeric coordinates remain fixed when content outside them changes.
-  const warming = await capture('region');
+  const warming = await capture('region','css');
   await selectRegion(warming, await regionEdges());
   await waitFor(s => s.state === 'loading');
   await page.evaluate(() => document.getElementById('grow').click());
@@ -108,14 +108,14 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   console.log('PASS invalid bounds rejected; outside growth retains numeric coordinates and restores');
 
   // Cancel with an actual live offscreen document, then recover with a new job.
-  const cancelledJob = await capture('full');
+  const cancelledJob = await capture('full','css');
   await waitFor(s => s.state === 'capturing');
   assert.equal((await worker.evaluate(() => chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] }))).length, 1);
   await page.keyboard.press('Escape');
   const cancelled = await waitFor(s => !s.busy);
   assert.equal(cancelled.state, 'cancelled');
   await assertRestored(before, position);
-  const recovery = await capture('region');
+  const recovery = await capture('region','css');
   assert.equal((await message({ type: 'CANCEL', id: cancelledJob.id })).ok, false);
   const newEdges = await regionEdges();
   await worker.evaluate(() => {
@@ -128,7 +128,7 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   await selectRegion(recovery, { ...newEdges, bottom: newEdges.top + 600 });
   assert.equal((await waitFor(s => !s.busy)).state, 'complete');
   assert.equal((await worker.evaluate(() => chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] }))).length, 1);
-  const afterCloseFailure = await capture('region');
+  const afterCloseFailure = await capture('region','css');
   await selectRegion(afterCloseFailure, { ...newEdges, bottom: newEdges.top + 600 });
   assert.equal((await waitFor(s => !s.busy)).state, 'complete');
   await assertRestored(before, position);

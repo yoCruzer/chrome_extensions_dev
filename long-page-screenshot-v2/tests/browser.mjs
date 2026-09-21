@@ -204,7 +204,7 @@ try {
     console.log("PASS native device scale", process.env.NATIVE_DPR, png.width, png.height);
     assert.equal((await message({ type: "SHOW", id: result.id })).ok, true);
     console.log("PASS real Chrome downloads.show API");
-    for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5]]) {
+    for (const [output, ratio] of [["auto", .9], ["css", 1], ["75", .75], ["50", .5]]) {
       const job = await capture("region", output);
       await selectRegion(job, { left: 200, top: 100, right: 700, bottom: 1700 });
       const done = await waitFor(s => !s.busy);
@@ -249,7 +249,7 @@ try {
   } else {
   await page.evaluate(() => scrollTo({ left: 123, top: 321, behavior: "instant" }));
   if (!process.env.EXTRA_ONLY) {
-  await capture("full");
+  await capture("full", "css");
   const full = await waitFor(s => !s.busy);
   assert.equal(full.state, "complete", JSON.stringify(full));
   assert.equal(full.parts, 1); console.log("FAST", JSON.stringify(full));
@@ -271,7 +271,7 @@ try {
   assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.getElementById("fixed").style.visibility]), [123, 321, ""]);
   console.log("PASS full: current 900px horizontal slice, exact vertical rows, bottom and page restoration");
 
-  await capture("region");
+  await capture("region", "css");
   await page.screenshot({ path: join(root, "selection.png") });
   // Exercise both picker buttons across a scroll, including the closed Shadow DOM UI.
   await page.mouse.click(642, 245);
@@ -314,7 +314,7 @@ try {
   });
 
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 2, mobile: false });
-  const retinaJob = await capture("region");
+  const retinaJob = await capture("region", "css");
   await selectRegion(retinaJob, { left: 200, top: 100, right: 700, bottom: 1700 });
   const retinaResult = await waitFor(s => !s.busy);
   assert.equal(retinaResult.state, "complete", JSON.stringify(retinaResult));
@@ -354,13 +354,13 @@ try {
     }
     addEventListener("scroll", grow);
   });
-  await capture("full");
+  await capture("full", "css");
   const lazy = await waitFor(s => !s.busy);
   // Rescaling all previously painted content has no translational overlap.
   assert.equal(lazy.state, "failed", JSON.stringify(lazy));
   assert.equal(lazy.reasonCode, "VISUAL_CONTINUITY_FAILED");
   assert.equal(lazy.result, undefined);
-  await capture("full");
+  await capture("full", "css");
   const stableGrowth = await waitFor(s => !s.busy);
   assert.equal(stableGrowth.state, "complete", JSON.stringify(stableGrowth));
   const [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));

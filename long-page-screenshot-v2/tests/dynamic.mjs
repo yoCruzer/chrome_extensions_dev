@@ -6,7 +6,7 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
     .map(data => PNG.sync.read(Buffer.from(data, 'base64')));
   const select = async (container = false) => {
     if (container) await page.evaluate(() => document.getElementById('target-article').style.paddingBottom = '20px');
-    await capture('region');
+    await capture('region','css');
     await page.mouse.click(642, 245);
     await page.mouse.click(80, 40);
     await page.evaluate(() => scrollTo(0, 1940));

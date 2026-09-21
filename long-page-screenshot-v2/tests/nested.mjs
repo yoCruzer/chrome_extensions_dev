@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 export async function testNested({page, worker, message, capture, waitFor, PNG, browserCDP}) {
   const position = () => page.evaluate(()=>[scrollY,document.getElementById('conversation').scrollTop]);
   const select = async cross => {
-    const job=await capture('region');
+    const job=await capture('region','css');
     await page.mouse.click(642,245);await page.mouse.click(80,40);
     if(cross) await page.evaluate(()=>document.getElementById('conversation').scrollTop=4180);
     await page.mouse.click(730,245);await page.mouse.click(579,cross?659:439);

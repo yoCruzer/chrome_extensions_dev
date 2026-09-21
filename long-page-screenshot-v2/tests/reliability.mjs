@@ -8,7 +8,7 @@ export async function testReliability({ page, worker, waitFor, capture, PNG, kin
   })()`);
   const select = async (cross = true, container = false) => {
     if(container) await page.evaluate(()=>document.getElementById("target-article").style.paddingBottom="20px");
-    await capture('region');
+    await capture('region','css');
     await page.mouse.click(642,245);await page.mouse.click(80,40);
     if(cross) await page.evaluate(()=>scrollTo(0,1940));
     await page.mouse.click(730,245);await page.mouse.click(579,cross ? (container ? 509 : 499) : 439);
