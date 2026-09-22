@@ -353,17 +353,17 @@ try {
     addEventListener("scroll", grow);
   });
   await capture("full", "css");
-  const lazy = await waitFor(s => !s.busy);
-  // Rescaling all previously painted content has no translational overlap.
-  assert.equal(lazy.state, "failed", JSON.stringify(lazy));
-  assert.equal(lazy.reasonCode, "VISUAL_CONTINUITY_FAILED");
-  assert.equal(lazy.result, undefined);
+  const warmedGrowth = await waitFor(s => !s.busy);
+  assert.equal(warmedGrowth.state, "complete", JSON.stringify(warmedGrowth));
+  assert.ok(warmedGrowth.diagnostics.warmup.growthEvents >= 1, JSON.stringify(warmedGrowth.diagnostics.warmup));
+  let [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
+  assert.equal(PNG.sync.read(await readFile(lazyFile.filename)).height, 2800);
   await capture("full", "css");
   const stableGrowth = await waitFor(s => !s.busy);
   assert.equal(stableGrowth.state, "complete", JSON.stringify(stableGrowth));
-  const [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
+  [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
   assert.equal(PNG.sync.read(await readFile(lazyFile.filename)).height, 2800);
-  console.log("PASS global content rescale: bounded visual failure, stable recapture includes final bottom");
+  console.log("PASS bounded warmup absorbs initial growth; stable recapture includes final bottom");
 
   await capture("full");
   await waitFor(s => s.state === "capturing");
