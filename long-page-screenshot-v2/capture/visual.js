@@ -118,18 +118,27 @@ function subjectCoreEvidence(expectedOffset, zoneEvidence) {
     Math.abs(center.scoreCandidateOffset - Math.round(expectedOffset)) <= 1 &&
     center.scoreBestScore >= VISUAL.subjectCoreScore;
   if (!qualityPass && !scorePass) return null;
-  const offset = qualityPass ? center.qualityCandidateOffset : center.scoreCandidateOffset;
+  // Score consensus establishes similarity, not a unique displacement. Equal
+  // adjacent-row scores are sorted by offset and used to manufacture -1px
+  // corrections repeatedly on static text. Require the existing probable-score
+  // margin before moving geometry; retain weaker similarity as probable only.
+  const scoreDisplacement = scorePass &&
+    center.scoreBestScore - center.scoreSecondBestScore >= VISUAL.probableScoreMargin;
+  const candidateOffset = qualityPass ? center.qualityCandidateOffset : center.scoreCandidateOffset;
+  const offset = qualityPass || scoreDisplacement ? candidateOffset : expectedOffset;
   const volatileEdges = [];
   for (const edge of ['left', 'right']) {
     const zone = zoneEvidence[edge];
     if (!zone.informativeTiles) continue;
-    const agreement = qualityPass && zone.qualityCandidateOffset === offset
+    const agreement = qualityPass && zone.qualityCandidateOffset === candidateOffset
       ? zone.qualityAgreementRatio
-      : zone.scoreCandidateOffset === offset ? zone.scoreAgreementRatio : 0;
+      : zone.scoreCandidateOffset === candidateOffset ? zone.scoreAgreementRatio : 0;
     if ((agreement ?? 0) < VISUAL.subjectCoreAgreement) volatileEdges.push(edge);
   }
   return {
     method: qualityPass ? 'quality' : 'score',
+    placementBasis: qualityPass ? 'quality' : scoreDisplacement ? 'score-margin' : 'geometry-score',
+    candidateOffset,
     offset,
     correction: offset - expectedOffset,
     informativeTiles: center.informativeTiles,

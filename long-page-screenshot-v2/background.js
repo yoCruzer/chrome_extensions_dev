@@ -671,6 +671,15 @@ async function run(s) {
           if (attempt) {
             s.metrics.retries++;
             await status(s, "loading", "所选内容发生变化，正在重新截图…");
+            // A target resize invalidated the previous canvas. Re-measure the
+            // target before rebuilding, while retaining the original window /
+            // zoom / tab baseline and the user's exact four selected edges.
+            await ensureVisible(s);
+            const refreshed = await request(s, "content", "MEASURE");
+            validateEnvironment(s, { ...refreshed,
+              tabZoom: await chrome.tabs.getZoom(s.tab.id), tabId: s.tab.id });
+            s.viewport = refreshed;
+            s.lastView = refreshed;
           }
           // The final UI edge values are the user's selected visual Scope. PREPARE
           // may normalize layout, but anchors must not rewrite these coordinates.

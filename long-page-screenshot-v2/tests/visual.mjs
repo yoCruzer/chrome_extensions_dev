@@ -11,7 +11,17 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
   await capture('full','css');
   const result=await waitFor(s=>!s.busy),v=result.diagnostics.visual;
   assert.equal(await page.evaluate(()=>visualMutationStatus().changed),true,'mutation hook must execute after warm-up');
-  assert.equal(v.bottomTailAccepted,0,`${kind} must remain visual-only`);
+  if(['ambiguous','low'].includes(kind)) {
+   // Mid-page uncertainty uses Robust geometry recovery; a final bounded tail
+   // is separately allowed only after physical-bottom and quiescence checks.
+   assert.equal(v.bottomTailAccepted,1,JSON.stringify(v));
+   const tail=v.trace.at(-1);
+   assert.equal(tail.event,'bottom-tail-anchored');
+   assert.equal(tail.finalExtent,3200);
+   assert.equal(tail.actualTargetScrollY+tail.viewportHeight,3200);
+   assert.ok(tail.novelPixels>0&&tail.novelPixels<=tail.tailLimit);
+   assert.equal(tail.canonicalEndBefore+tail.novelPixels,3200);
+  } else assert.equal(v.bottomTailAccepted,0,`${kind} must remain visual-only`);
   if(kind==='unrelated') {
    assert.equal(result.state,'failed',JSON.stringify(result));assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');
    assert.equal(result.parts,0);assert.equal(result.result,undefined);assert.equal(v.visualRecoveryRetries,2);assert.equal(v.visualFailures,1);
@@ -45,13 +55,20 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
   assert.equal(await page.evaluate(()=>scrollY),0);
   console.log('PASS visual',kind,JSON.stringify({checks:v.visualChecks,retries:v.visualRecoveryRetries,subjectCore:v.subjectCorePlacements}));
  }
- await page.setViewportSize({width:900,height:700});
- await page.goto(new URL('?kind=edge-heavy',page.url()).href);
- await installVisualMutation(worker);
- await capture('full','css','strict');
- const strictEdge=await waitFor(s=>!s.busy);
- assert.equal(strictEdge.state,'failed',JSON.stringify(strictEdge));
- assert.equal(strictEdge.reasonCode,'VISUAL_CONTINUITY_FAILED');
- assert.equal(strictEdge.parts,0);
- console.log('PASS visual edge-heavy strict fail-closed');
+ for(const kind of ['edge-heavy','ambiguous','low']) {
+  await page.setViewportSize({width:900,height:700});
+  await page.goto(new URL('?kind='+kind,page.url()).href);
+  await installVisualMutation(worker);
+  await capture('full','css','strict');
+  const strict=await waitFor(s=>!s.busy);
+  assert.equal(strict.state,'failed',JSON.stringify(strict));
+  assert.equal(strict.reasonCode,'VISUAL_CONTINUITY_FAILED');
+  assert.equal(strict.parts,0);assert.equal(strict.result,undefined);
+  assert.equal(strict.diagnostics.visual.bottomTailAccepted,0);
+  assert.equal(strict.diagnostics.visual.geometryFallbacks,0);
+  assert.equal(strict.diagnostics.visual.subjectCorePlacements,0);
+  assert.equal(await page.evaluate(()=>scrollY),0);
+  assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);
+  console.log('PASS visual strict fail-closed',kind);
+ }
 }

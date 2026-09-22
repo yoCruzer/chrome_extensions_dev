@@ -1,4 +1,5 @@
 import { clickPickerButton } from './picker.mjs';
+import { installRegionOracle, verifyRegionOracle } from './region-oracle.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -13,23 +14,20 @@ export async function testReliability({ page, worker, waitFor, capture, PNG, kin
     await clickPickerButton(page,'first');await page.mouse.click(80,40);
     if(cross) await page.evaluate(()=>scrollTo(0,1940));
     await clickPickerButton(page,'second');await page.mouse.click(579,cross ? (container ? 509 : 499) : 439);
+    await installRegionOracle(worker);
   };
   const start = () => clickPickerButton(page,'capture');
-  const verify = async (result,height,grown = false) => {
+  const verify = async (result,height,{stable = true} = {}) => {
     assert.equal(result.state,'complete',JSON.stringify(result));
     assert.equal(result.parts,1);
-    const png=PNG.sync.read(await readFile(result.result.filename));
-    assert.equal(png.width,499);assert.equal(png.height,height);
-    const references=(await page.evaluate(()=>[...document.querySelectorAll('canvas')].map(c=>c.toDataURL().split(',')[1])))
-      .map(v=>PNG.sync.read(Buffer.from(v,'base64')));
-    for(let y=0;y<height;y++) {
-      if(grown && (y>=2700 || (y>=1920 && y<2220))) {
-        for(let x=0;x<499;x++) assert.deepEqual([...png.data.subarray((y*499+x)*4,(y*499+x+1)*4)],[224,0,224,255]);
-        continue;
+    const png=await verifyRegionOracle(worker,result,{left:80,top:40,right:579,bottom:40+height},PNG);
+    if(stable) {
+      const references=(await page.evaluate(()=>[...document.querySelectorAll('canvas')].map(c=>c.toDataURL().split(',')[1])))
+        .map(v=>PNG.sync.read(Buffer.from(v,'base64')));
+      for(let y=0;y<height;y++) {
+        const reference=references[Math.floor(y/480)], offset=(y%480)*500*4;
+        assert.deepEqual(png.data.subarray(y*499*4,(y+1)*499*4),reference.data.subarray(offset,offset+499*4),`row ${y}`);
       }
-      const row=grown && y>=2220 ? y-300 : y;
-      const reference=references[Math.floor(row/480)], offset=(row%480)*500*4;
-      assert.deepEqual(png.data.subarray(y*499*4,(y+1)*499*4),reference.data.subarray(offset,offset+499*4),`row ${y}`);
     }
   };
   if(kind==='chat') {
@@ -48,7 +46,7 @@ export async function testReliability({ page, worker, waitFor, capture, PNG, kin
   if(kind==='chat') assert.equal(await page.locator('#composer').evaluate(e=>getComputedStyle(e).position),'sticky');
   await start();await verify(await waitFor(s=>!s.busy),399);
   console.log(`PASS ${kind} same viewport: no selection scrolling, exact content and restored layout`);
-  await page.reload();await select();await start();await waitFor(s=>s.state==='capturing');
+  await page.reload();await select();await start();await waitFor(s=>s.state==='capturing'&&s.frames>=1);
   if(kind==='csdn') {
     await page.evaluate(()=>mutateOutside());
     // Model root client changes even on macOS overlay-scrollbar configurations.
@@ -59,25 +57,24 @@ export async function testReliability({ page, worker, waitFor, capture, PNG, kin
       return {dpr:devicePixelRatio,clientWidth:document.documentElement.clientWidth};
     });
   }
-  const cross=await waitFor(s=>!s.busy);await verify(cross,2399);
+  const cross=await waitFor(s=>!s.busy);await verify(cross,2399,{stable:kind!=='csdn'});
   if(kind==='csdn') {
     assert.equal(cross.diagnostics.environment.actual.dpr,3);
     assert.equal(cross.diagnostics.environment.actual.clientWidth,880);
     assert.equal(cross.metrics.retries,0);
   }
-  console.log(`PASS ${kind} cross screen: TOP, all middle checkpoints, BOTTOM and every pixel; outside markers excluded`);
+  console.log(`PASS ${kind} cross screen: every pixel at fixed viewport edges, including any scrollbar-gutter shift`);
   if(kind==='chat') return;
-  await page.reload();await select(true,true);await start();await waitFor(s=>s.state==='capturing');
+  await page.reload();await select(true,true);await start();await waitFor(s=>s.state==='capturing'&&s.frames>=1);
   await page.evaluate(()=>growArticle());
   const grown=await waitFor(s=>!s.busy);
   assert.equal(grown.state,'complete',JSON.stringify(grown));
-  const grownPNG=PNG.sync.read(await readFile(grown.result.filename));
-  assert.equal(grownPNG.width,499);assert.equal(grownPNG.height,2409);
+  await verify(grown,2409,{stable:false});
   assert.equal(grown.attempt,1);assert.equal(grown.metrics.retries,0);
   assert.ok(grown.diagnostics.regionDiagnostics.shapeChanges > 0, JSON.stringify(grown.diagnostics));
   console.log('PASS csdn in-scope growth: frozen visual Scope completes without expanding output');
   for(const change of ['innerWidth','tabZoom','visualScale']) {
-    await page.reload();await select();await start();await waitFor(s=>s.state==='capturing');
+    await page.reload();await select();await start();await waitFor(s=>s.state==='capturing'&&s.frames>=1);
     if(change==='innerWidth') await page.setViewportSize({width:880,height:700});
     if(change==='tabZoom') await worker.evaluate(async()=>{const [tab]=await chrome.tabs.query({active:true,currentWindow:true});await chrome.tabs.setZoom(tab.id,1.25)});
     if(change==='visualScale') await isolated(()=>Object.defineProperty(window.visualViewport,'scale',{configurable:true,get:()=>1.2}));
@@ -90,7 +87,7 @@ export async function testReliability({ page, worker, waitFor, capture, PNG, kin
     if(change==='innerWidth') await page.setViewportSize({width:900,height:700});
     if(change==='tabZoom') await worker.evaluate(async()=>{const [tab]=await chrome.tabs.query({active:true,currentWindow:true});await chrome.tabs.setZoom(tab.id,1)});
   }
-  await page.reload();await select();await start();await waitFor(s=>s.state==='capturing');
+  await page.reload();await select();await start();await waitFor(s=>s.state==='capturing'&&s.frames>=1);
   const other=await page.context().newPage();await other.bringToFront();
   const switched=await waitFor(s=>!s.busy);
   assert.equal(switched.state,'cancelled',JSON.stringify(switched));
