@@ -2,24 +2,175 @@
 // are four CSS pixels apart (capped at 384), independent of device/output scale.
 export const VISUAL = Object.freeze({ tiles: 12, maxWidth: 384, sampleX: 4,
   radius: 96, rows: 64, minTiles: 3, agreement: 0.6,
-  minDeviation: 5, maxError: 0.04, maxAbsoluteError: 0.5, margin: 0.018, exactMargin: 0.005 });
+  minDeviation: 5, maxError: 0.04, maxAbsoluteError: 0.5, margin: 0.018, exactMargin: 0.005,
+  probableScore: 0.72, probableScoreMargin: 0.08,
+  subjectCoreAgreement: 2 / 3, subjectCoreMinTiles: 3, subjectCoreScore: 0.75 });
 export const overlapCSS = height => Math.min(height - 32, Math.max(160, Math.min(320, height * 0.25)));
+
+
+// Robust completion-first placement after normal matching + bounded recovery.
+// This never upgrades uncertainty to "matched": it returns an explicit probable
+// placement only for ambiguity / low-information with coherent positive geometry.
+// Strong mismatch ("failed") and Strict policy remain fail-closed.
+export function robustPlacement(previous, expectedOffset, visual, policy = 'robust', fallbackMode = 'all') {
+  const scoreProbable = visual?.result === 'failed' && visual.failureReason === 'insufficient-quality' &&
+    visual.scoreAgreeingTiles >= VISUAL.minTiles && visual.scoreAgreementRatio >= VISUAL.agreement &&
+    Number.isFinite(visual.scoreCandidateOffset) &&
+    visual.scoreBestScore >= VISUAL.probableScore &&
+    visual.scoreBestScore - visual.scoreSecondBestScore >= VISUAL.probableScoreMargin;
+  const geometryScoreProbable = visual?.result === 'failed' && visual.failureReason === 'insufficient-quality' &&
+    Number.isFinite(visual.scoreCandidateOffset) &&
+    Math.abs(visual.scoreCandidateOffset - Math.round(expectedOffset)) <= 1 &&
+    visual.scoreAgreementRatio >= 0.5 && visual.scoreBestScore >= 0.75;
+  const allowScore = fallbackMode === 'score' || fallbackMode === 'all';
+  const allowGeometry = fallbackMode === 'all';
+  if (policy !== 'robust' || !visual ||
+      (!allowGeometry && !(allowScore && scoreProbable)) ||
+      (allowGeometry && !['ambiguous', 'low-information'].includes(visual.result) &&
+        !scoreProbable && !geometryScoreProbable)) return null;
+  const previousVisibleHeight = previous?.end - previous?.canonicalY;
+  if (!Number.isFinite(expectedOffset) || expectedOffset <= 0 ||
+      !Number.isFinite(previousVisibleHeight) || previousVisibleHeight <= 0 ||
+      expectedOffset >= previousVisibleHeight) return null;
+
+  let placementOffset = expectedOffset, fallbackMethod = 'geometry';
+  if (allowScore && scoreProbable) {
+    placementOffset = visual.scoreCandidateOffset;
+    fallbackMethod = 'probable-score';
+  } else if (allowGeometry && geometryScoreProbable) {
+    placementOffset = expectedOffset;
+    fallbackMethod = 'geometry-score';
+  } else if (allowGeometry && visual.result === 'ambiguous' && visual.agreeingTiles >= VISUAL.minTiles &&
+      Number.isFinite(visual.candidateOffset)) {
+    placementOffset = visual.candidateOffset;
+    fallbackMethod = 'probable-visual';
+  }
+  if (!allowGeometry && fallbackMethod === 'geometry') return null;
+  if (!Number.isFinite(placementOffset) || placementOffset <= 0 || placementOffset >= previousVisibleHeight) return null;
+
+  return {
+    canonicalY: previous.canonicalY + placementOffset,
+    novelTop: previous.end,
+    visual: {
+      ...visual,
+      continuity: 'probable',
+      fallbackMethod,
+      placementOffset,
+      placementCorrection: placementOffset - expectedOffset,
+      path: fallbackMethod === 'geometry' ? 'geometry-fallback' : fallbackMethod
+    }
+  };
+}
+
+
+const ZONES = Object.freeze([
+  ['left', 0, 3],
+  ['center', 3, 9],
+  ['right', 9, 12]
+]);
+
+function largestOffsetGroup(items) {
+  let best = [];
+  for (const item of items) {
+    const group = items.filter(other => other.offset === item.offset);
+    if (group.length > best.length) best = group;
+  }
+  return best;
+}
+
+function summarizeZone(informative, votes, scores, left, right) {
+  const info = informative.filter(tile => tile >= left && tile < right);
+  const quality = votes.filter(vote => vote.tile >= left && vote.tile < right);
+  const raw = scores.filter(score => score.tile >= left && score.tile < right);
+  const qualityGroup = largestOffsetGroup(quality);
+  const scoreGroup = largestOffsetGroup(raw);
+  const averageScore = (group, key) => group.length
+    ? 1 / (1 + group.reduce((sum, item) => sum + item[key], 0) / group.length)
+    : 0;
+  return {
+    informativeTiles: info.length,
+    decisiveQualityTiles: quality.length,
+    qualityCandidateOffset: qualityGroup.length ? qualityGroup[0].offset : null,
+    qualityAgreeingTiles: qualityGroup.length,
+    qualityAgreementRatio: info.length ? qualityGroup.length / info.length : null,
+    scoreCandidateOffset: scoreGroup.length ? scoreGroup[0].offset : null,
+    scoreAgreeingTiles: scoreGroup.length,
+    scoreAgreementRatio: info.length ? scoreGroup.length / info.length : null,
+    scoreBestScore: averageScore(scoreGroup, 'error'),
+    scoreSecondBestScore: averageScore(scoreGroup, 'second')
+  };
+}
+
+function buildZoneEvidence(informative, votes, scores) {
+  return Object.fromEntries(ZONES.map(([name, left, right]) =>
+    [name, summarizeZone(informative, votes, scores, left, right)]));
+}
+
+function subjectCoreEvidence(expectedOffset, zoneEvidence) {
+  const center = zoneEvidence.center;
+  const qualityPass = center.informativeTiles >= VISUAL.subjectCoreMinTiles &&
+    center.qualityAgreeingTiles >= VISUAL.subjectCoreMinTiles &&
+    center.qualityAgreementRatio >= VISUAL.subjectCoreAgreement;
+  const scorePass = center.informativeTiles >= VISUAL.subjectCoreMinTiles &&
+    center.scoreAgreeingTiles >= VISUAL.subjectCoreMinTiles &&
+    center.scoreAgreementRatio >= VISUAL.subjectCoreAgreement &&
+    Number.isFinite(center.scoreCandidateOffset) &&
+    Math.abs(center.scoreCandidateOffset - Math.round(expectedOffset)) <= 1 &&
+    center.scoreBestScore >= VISUAL.subjectCoreScore;
+  if (!qualityPass && !scorePass) return null;
+  // Score consensus establishes similarity, not a unique displacement. Equal
+  // adjacent-row scores are sorted by offset and used to manufacture -1px
+  // corrections repeatedly on static text. Require the existing probable-score
+  // margin before moving geometry; retain weaker similarity as probable only.
+  const scoreDisplacement = scorePass &&
+    center.scoreBestScore - center.scoreSecondBestScore >= VISUAL.probableScoreMargin;
+  const candidateOffset = qualityPass ? center.qualityCandidateOffset : center.scoreCandidateOffset;
+  const offset = qualityPass || scoreDisplacement ? candidateOffset : expectedOffset;
+  const volatileEdges = [];
+  for (const edge of ['left', 'right']) {
+    const zone = zoneEvidence[edge];
+    if (!zone.informativeTiles) continue;
+    const agreement = qualityPass && zone.qualityCandidateOffset === candidateOffset
+      ? zone.qualityAgreementRatio
+      : zone.scoreCandidateOffset === candidateOffset ? zone.scoreAgreementRatio : 0;
+    if ((agreement ?? 0) < VISUAL.subjectCoreAgreement) volatileEdges.push(edge);
+  }
+  return {
+    method: qualityPass ? 'quality' : 'score',
+    placementBasis: qualityPass ? 'quality' : scoreDisplacement ? 'score-margin' : 'geometry-score',
+    candidateOffset,
+    offset,
+    correction: offset - expectedOffset,
+    informativeTiles: center.informativeTiles,
+    agreeingTiles: qualityPass ? center.qualityAgreeingTiles : center.scoreAgreeingTiles,
+    agreementRatio: qualityPass ? center.qualityAgreementRatio : center.scoreAgreementRatio,
+    bestScore: center.scoreBestScore,
+    secondBestScore: center.scoreSecondBestScore,
+    volatileEdges
+  };
+}
 
 // Frames contain only bounded top/tail strips, never complete screenshot history.
 export function matchVertical(previous, current, expectedOffset, fast = false, policy = 'robust') {
   const radius = VISUAL.radius, width = previous.width;
   policy = policy === 'strict' ? 'strict' : 'robust';
   const informative = [];
-  const base = { policy, expectedOffset, matchedOffset: null, correction: null, searchRadius: radius,
-    overlapHeight: previous.height - expectedOffset, informativeTiles: 0, agreeingTiles: 0,
-    agreementRatio: 0, bestScore: 0, secondBestScore: 0, confidence: 0 };
-  if (width !== current.width) return { ...base, result: 'failed' };
+  const base = { policy, expectedOffset, matchedOffset: null, correction: null,
+    candidateOffset: null, candidateCorrection: null,
+    scoreCandidateOffset: null, scoreCandidateCorrection: null,
+    searchRadius: radius, overlapHeight: previous.height - expectedOffset,
+    informativeTiles: 0, qualityTiles: 0, agreeingTiles: 0, scoreAgreeingTiles: 0,
+    agreementRatio: 0, scoreAgreementRatio: 0, qualityRatio: 0,
+    bestScore: 0, secondBestScore: 0, scoreBestScore: 0, scoreSecondBestScore: 0,
+    confidence: 0, failureReason: null, zoneEvidence: null, subjectCore: null,
+    matchMode: null, volatileEdges: [] };
+  if (width !== current.width) return { ...base, result: 'failed', failureReason: 'width-mismatch' };
   const low = Math.max(1, Math.round(expectedOffset) - radius);
   const high = Math.min(previous.height - 32, Math.round(expectedOffset) + radius);
   // The same rows participate in every candidate; changing overlap size must not
   // favor an offset just because it compares fewer pixels.
   const start = Math.max(previous.start, high + current.start), end = Math.min(previous.height, low + current.start + current.data.length / width);
-  if (end - start < 24) return { ...base, result: 'failed' };
+  if (end - start < 24) return { ...base, result: 'failed', failureReason: 'insufficient-overlap' };
   const step = Math.max(1, Math.ceil((end - start) / (fast ? 24 : VISUAL.rows)));
   const votes = [], scores = [];
   let qualityTiles = 0;
@@ -46,7 +197,7 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
     candidates.sort((a, b) => a.error - b.error);
     const [best, second] = candidates;
     if (!best || !second) continue;
-    scores.push({ ...best, second: second.error });
+    scores.push({ tile, ...best, second: second.error });
     // A gray-only match can alias two differently colored smooth gradients.
     // Verify the winning candidate's sampled RGB values; no second RGB search.
     let colorError = 0;
@@ -66,7 +217,10 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
       votes.push({ tile, ...best, second: second.error });
     }
   }
-  if (base.informativeTiles < VISUAL.minTiles) return { ...base, result: 'low-information' };
+  base.qualityTiles = qualityTiles;
+  base.qualityRatio = base.informativeTiles ? qualityTiles / base.informativeTiles : 0;
+  base.zoneEvidence = buildZoneEvidence(informative, votes, scores);
+  if (base.informativeTiles < VISUAL.minTiles) return { ...base, result: 'low-information', failureReason: 'low-information' };
   let agreeing = [];
   for (const vote of votes) {
     const group = votes.filter(other => other.offset === vote.offset);
@@ -74,15 +228,48 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
   }
   base.agreeingTiles = agreeing.length;
   base.agreementRatio = agreeing.length / base.informativeTiles;
+  if (agreeing.length) {
+    base.candidateOffset = agreeing[0].offset;
+    base.candidateCorrection = base.candidateOffset - expectedOffset;
+  }
+  let scoreAgreeing = [];
+  for (const score of scores) {
+    const group = scores.filter(other => other.offset === score.offset);
+    if (group.length > scoreAgreeing.length) scoreAgreeing = group;
+  }
+  base.scoreAgreeingTiles = scoreAgreeing.length;
+  base.scoreAgreementRatio = scoreAgreeing.length / base.informativeTiles;
+  if (scoreAgreeing.length) {
+    base.scoreCandidateOffset = scoreAgreeing[0].offset;
+    base.scoreCandidateCorrection = base.scoreCandidateOffset - expectedOffset;
+    base.scoreBestScore = 1 / (1 + scoreAgreeing.reduce((sum, score) => sum + score.error, 0) / scoreAgreeing.length);
+    base.scoreSecondBestScore = 1 / (1 + scoreAgreeing.reduce((sum, score) => sum + score.second, 0) / scoreAgreeing.length);
+  }
   const summary = agreeing.length ? agreeing : scores;
   if (summary.length) {
     base.bestScore = 1 / (1 + summary.reduce((sum, vote) => sum + vote.error, 0) / summary.length);
     base.secondBestScore = 1 / (1 + summary.reduce((sum, vote) => sum + vote.second, 0) / summary.length);
   }
-  if (agreeing.length < VISUAL.minTiles || base.agreementRatio < VISUAL.agreement) return { ...base, result: qualityTiles >= VISUAL.minTiles ? 'ambiguous' : 'failed' };
+  if (agreeing.length < VISUAL.minTiles || base.agreementRatio < VISUAL.agreement) {
+    const subjectCore = !fast && policy === 'robust'
+      ? subjectCoreEvidence(expectedOffset, base.zoneEvidence)
+      : null;
+    if (subjectCore) {
+      base.matchedOffset = subjectCore.offset;
+      base.correction = subjectCore.correction;
+      base.confidence = subjectCore.agreementRatio * Math.max(subjectCore.bestScore || 1, 0);
+      base.subjectCore = subjectCore;
+      base.matchMode = 'subject-core';
+      base.volatileEdges = subjectCore.volatileEdges;
+      return { ...base, result: 'matched', continuity: 'probable', fallbackMethod: 'subject-core' };
+    }
+    const result = qualityTiles >= VISUAL.minTiles ? 'ambiguous' : 'failed';
+    return { ...base, result, failureReason: result === 'ambiguous' ? 'insufficient-consensus' : 'insufficient-quality' };
+  }
   base.matchedOffset = agreeing[0].offset;
   base.correction = base.matchedOffset - expectedOffset;
   base.confidence = base.agreementRatio * Math.max(0, base.bestScore);
+  base.matchMode = 'full-width';
   if (policy === 'strict') {
     base.zones = {};
     for (const [name, left, right] of [['left', 0, 3], ['center', 3, 9], ['right', 9, 12]]) {
@@ -92,7 +279,7 @@ export function matchVertical(previous, current, expectedOffset, fast = false, p
       base.zones[name] = { informativeTiles, agreeingTiles, agreementRatio,
         pass: !informativeTiles || agreementRatio >= 2 / 3 };
     }
-    if (Object.values(base.zones).some(zone => !zone.pass)) return { ...base, result: 'strict-coverage-failed' };
+    if (Object.values(base.zones).some(zone => !zone.pass)) return { ...base, result: 'strict-coverage-failed', failureReason: 'strict-zone' };
   }
   return { ...base, result: 'matched' };
 }

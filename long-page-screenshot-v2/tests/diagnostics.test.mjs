@@ -37,11 +37,11 @@ test('trace keeps latest 150 entries across attempts; serialization excludes pri
   for (const state of ['complete','failed']) {
     const json=c.serializeDiagnostics({state,reasonCode:state==='failed'?'FULL_REFLOW':undefined,attempt:2,
       message:'private-token',url:'https://private.test/?token=secret',result:{filename:'private-token'},
-      metrics:{captures:3,secret:'private-token'}, diagnostics:{initialHeight:2400,fullProof:s.proofDiagnostics,html:'private-token'}});
-    assert.doesNotMatch(json,/private|secret|https|filename|html/);
+      metrics:{captures:3,filenameFallbacks:2,secret:'private-token'}, diagnostics:{initialHeight:2400,fullProof:s.proofDiagnostics,html:'private-token'}});
+    assert.doesNotMatch(json,/private|secret|https|"filename"\s*:|html/);
     const report=JSON.parse(json);
     assert.equal(report.state,state);assert.equal(report.attempt,2);
-    assert.equal(report.metrics.captures,3);assert.equal(report.diagnostics.fullProof.trace.length,150);
+    assert.equal(report.metrics.captures,3);assert.equal(report.metrics.filenameFallbacks,2);assert.equal(report.diagnostics.fullProof.trace.length,150);
     assert.equal(report.diagnostics.fullProof.trace.at(-1).attempt,2);
     assert.ok(json.includes('\n  "state"'));
   }

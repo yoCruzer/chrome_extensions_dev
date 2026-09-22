@@ -30,7 +30,9 @@ export async function testDiagnostics({page,capture,waitFor,worker,PNG}) {
     assert.equal(report.diagnostics.fullProof.counters.mutations,
       report.diagnostics.fullProof.counters.ignoredMutations+report.diagnostics.fullProof.counters.dirtyMutations);
     assert.equal(report.diagnostics.fullProof.trace.at(-1).frameCount,result.frames);
-    assert.doesNotMatch(text,/data:image|ARTICLE \d|INSERTED ABOVE|SECOND REFLOW|filename|127\.0\.0\.1/);
+    assert.equal(report.metrics.filenameFallbacks,result.metrics.filenameFallbacks);
+    // Match the private field name, not the numeric filenameFallbacks counter.
+    assert.doesNotMatch(text,/data:image|ARTICLE \d|INSERTED ABOVE|SECOND REFLOW|"filename"\s*:|127\.0\.0\.1/);
     if(mode==='success') {
       assert.equal(report.reasonCode,null);assert.equal(report.diagnostics.fullProof.trigger,null);
       const png=PNG.sync.read(await readFile(result.result.filename));

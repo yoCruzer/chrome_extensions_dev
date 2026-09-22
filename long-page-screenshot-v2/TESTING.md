@@ -290,3 +290,136 @@ output/UI 定向补验退出码 **0**：Auto／CSS／75／50／device 的完整�
 浏览器使用已安装 Chrome、隔离临时 profile 和本地 HTTP fixture；日志 `/tmp/policy-target.log`，PNG/profile 位于系统临时目录，未入库。首次环境启动因 sandbox localhost 限制及缺少 Playwright bundled Chromium 未执行测试，随后改用已安装 Chrome 完成以上定向验证。
 
 Due to execution/token budget, full regression matrix was intentionally NOT run.
+
+## Completion-First Reset Phase 1 targeted plan — 2026-09-18
+
+基线：`5c86a5962676caadbfc78819e7742c25984afc33`。分支：`feature/completion-first-reset`。
+
+本阶段只验证 Robust probable placement：
+
+- matcher 单元：低于多数门槛但 ≥3 个高质量 tiles 支持同一 −45px correction → `ambiguous` + candidate，Robust 使用 `probable-visual`；
+- repeated rows 无唯一 visual candidate → Robust 使用 observed geometry；
+- low-information → Robust geometry probable；
+- unrelated / strong mismatch (`failed`) → 无 fallback；
+- Strict 对相同 ambiguity → 无 fallback；
+- real-Chrome visual fixture：`ambiguous` / `low` 从旧的无 PNG 改为完整输出并记录 probable；`unrelated` 仍 `VISUAL_CONTINUITY_FAILED`。
+- 不修改 Region，现有 policy/Region targeted smoke 应保持原语义。
+
+本阶段不要求完整回归；先跑 `visual.test.mjs`、`VISUAL_ONLY` 及必要的 policy smoke。真实 GitHub/CSDN 仍由用户在分支版本上验收。
+
+## Completion-First Reset Phase 1.1 targeted plan — 2026-09-20
+
+新增 bounded warmup 和 visual evidence diagnostics，不改变 Region/Multi-part。
+
+最小验证：
+
+- background 单元：2100→2500 的一次 warmup growth，最终 bottom stable 并回到 top；
+- matcher 原测试继续通过，并检查 trace 可区分 `qualityTiles` 与 `failureReason`；
+- 用户真实 GitHub repo tree / GitHub markdown / CSDN 复测：优先观察 warmup.stopReason、growthEvents、visual.insufficientQualityRejects、trace.failureReason；
+- 不把 `failed/insufficient-quality` 直接改成 Robust geometry fallback，先用真实诊断判断是否属于“证据不足”还是“全局视觉矛盾”。
+
+## Completion-First Reset Phase 2 targeted plan — 2026-09-20
+
+Phase 2A 冻结 Full Page 为 vertical-only viewport slice；Phase 2B 将 Region anchors 从持续 veto 改为 freeze/rebase evidence。
+
+定向验证重点：
+
+- Full Page 起始 window.scrollX 非 0、document width 大于 viewport：所有正式滚动请求保持同一 x，PNG 宽度只等于 clientWidth，结束后恢复原 scrollX；
+- reported scrollWidth 变化不再触发 FULL_WIDTH_CHANGED；
+- offscreen FULL_FRAME 不再存在横向 reachability veto；
+- Region 0.5px 以内尺寸 jitter 不失败；
+- Region 帧间 rigid translation 直接 rebase；
+- anchor 临时失效使用 frozen/runtime Scope，而不是立即 ANCHOR_UNRESOLVABLE；
+- target resize、zoom/tab/window 环境变化仍 fail/restart；
+- 不运行 Multi-part，本阶段仍保持单 PNG 输出预算。
+
+### Phase 2 regression-semantics amendment
+
+Phase 2 intentionally supersedes older Region expectations in the historical sections above:
+
+- post-freeze anchor loss is advisory fallback, not automatic `ANCHOR_UNRESOLVABLE`;
+- post-freeze anchor separation/shape growth does not resize output or force Attempt 2;
+- bitmap-time rigid translation uses rebase diagnostics instead of mandatory frame discard;
+- Full Page no longer has horizontal columns; old multi-column recovery assertions are historical only.
+
+Deterministic tests must evaluate the frozen visual Scope, not require the final page's semantic content extent to be reconstructed after mid-capture mutations.
+
+## Save-name + probable-score targeted plan — 2026-09-20
+
+- 120 个中文字符 + emoji + 路径非法字符：建议 basename 按 UTF-8 bytes 有界且不含路径非法字符；
+- 第一次 downloads.download 抛 `Invalid filename`：自动使用 timestamp-only safe basename 重试，真实保存路径仍来自 DownloadItem.filename；
+- 相邻帧仅有细微确定性像素噪声：strict quality gate 可返回 `insufficient-quality`，但 raw score 多数仍指向同一 offset，Robust 使用 `probable-score`；
+- 完全 unrelated frame：raw offset 不形成高质量多数，仍无 Robust fallback；
+- Strict 永远不使用 probable-score。
+
+## Phase 2.1 targeted corrections — 2026-09-20
+
+- Region: frozen `x/y/width/height` 不得因 anchors 后续平移而改变；选择 200–1200 的水平区域必须继续以 200–1200 为 crop Scope。
+- Anchor 平移只增加 `anchorTranslations` diagnostics。
+- Full Page: 使用用户真实 trace 构造 strong retry-1 probable-score；保持 `probableScoreMargin=0.08` 不变，retry 1 即可接受。
+- retry-2 margin 不足 0.08 的同类证据仍不能仅因“最后一次”而降低门槛。
+
+## Phase 2.2 targeted corrections — 2026-09-20
+
+- Region selection UI edges are authoritative: update/scroll must not silently rewrite 200–1200 into anchor-derived coordinates.
+- Background must freeze `regionFromEdges(s.edges, s.viewport)`, never rebuild from `resolved.region` after PREPARE.
+- Full Page final Robust recovery: real trace `expected=272 / scoreCandidate=272 / agreement=.75 / best=.965` → `geometry-score`.
+- Unrelated low-score/low-agreement frame remains rejected; Strict remains verified-only.
+
+## Phase 2.3 targeted plan — 2026-09-20
+
+- nested target viewport left=180，用户横向选择 200–1200 → Region width=1000、cropLeft=200；
+- drawGeometry source x 必须是 200，而不是 20 或 180；
+- Region scroll 保持当前 horizontal scroll，只改变 y；
+- normalized Region view.x=0，visibleTile 不再规划横向第二列；
+- Full Page 不修改。
+
+## Phase 3 — Balanced Auto + automatic Multi-part output（2026-09-20）
+
+本阶段改变的是输出规划／renderer，不改变已通过真实页面验收的 Full Page Robust continuity、warm-up、vertical-only Capture 或 Region viewport-fixed horizontal crop。
+
+目标语义：
+
+- Auto 固定目标约 CSS 90%，不再随总高度继续降低比例；CSS/75%/50%/Device 均保持请求比例。
+- 单个 part 继续受 16 MP / 16384px envelope 约束；总输出允许多个 part。
+- `outputGeometry` 返回 `partHeight / partCount`；当前最多 24 parts。
+- offscreen 只保留一个活动 part canvas。frame 若跨 part 边界，在输出像素空间拆成两个 draw segment；part 满后立即 encode 为 Blob URL 并释放 canvas。
+- Full Page `EXTEND` 只能增加 total height / partCount，不得改变 scaleX/scaleY/partHeight。
+- `EXPORT` 返回有序 parts；最终 `RELEASE` 必须 revoke 所有 URLs。
+- background 依次下载 `-01-of-03.png` 等文件，保存真实 `DownloadItem.filename` 到 `results[]`；单 part 不增加 suffix。
+- 页面结果面板展示所有 parts 的实际路径／尺寸；Finder 按钮仍定位第一张。
+
+定向证据要求：
+
+1. geometry：900×26000 CSS 页面 Auto→810×23400 total，part canvas 保持安全；CSS→900×26000，不再失败。
+2. rolling renderer：1000×22000 Region Auto→900×19800，输出 parts 高度 16384 + 3416；跨 part frame 产生额外 draw segment，parts 高度和精确等于 total height。
+3. dynamic extension：12000→26000 时 Auto 始终 scale=0.9，最终 total=23400、partCount=2，不重采/下采样已提交像素。
+4. resource cleanup：成功 final release、encode failure、pagehide 都释放 canvas/URLs，并允许新 session。
+5. save：多 part 使用顺序 suffix；结果记录真实 Chrome 下载路径。
+6. OUTPUT_ONLY 浏览器回归：短 Region Auto 变为 90%；26000px Full Page 的 CSS 与 Auto 均成功多图；极端高度仅在超过 24 parts 时预检失败。
+
+## Phase 4 targeted plan — 2026-09-21
+
+范围只限 Full Page visual evidence policy；不修改 Phase 3 multi-part renderer、Region、warm-up、CaptureTarget 或 manifest。
+
+定向门禁：
+
+1. Node matcher：左右 edge 共 5/12 tiles 变化，使 full-width quality agreement <0.6；Robust 由 center subject-core（≥2/3）接受，Strict 不接受。
+2. unrelated frame：center 不能形成 subject-core，仍失败。
+3. browser `edge-heavy` fixture：Robust 输出完整 PNG，中央 300–750px 每行与 immutable reference 一致；diagnostics 必须出现 subject-core + left/right volatile counters。
+4. 同 fixture Strict：`VISUAL_CONTINUITY_FAILED`、零 PNG。
+5. 原 static/github/sidebar/ad/islands/global/transient/ambiguous/low/unrelated 场景语义保持不变。
+6. Phase 3 output 代码不在本阶段 diff 中。
+
+## Phase 4.1 targeted plan — 2026-09-21
+
+范围只限 terminal bottom-tail authorization / diagnostics；不修改 normal matcher、Phase 4 subject-core、Phase 3 renderer、Region 或 manifest。
+
+定向门禁：
+
+1. `assessBottomTail`: observed height +1px、visible bottom +0.5px 仍可对 authoritative extent 建立 44px tail；>1px extent/bottom drift 明确拒绝并给 reason。
+2. existing 1/44/228px mapping 与 320px hard cap 不变。
+3. offscreen fractional terminal view 最终 end 必须精确等于 finalExtent，draw 只写 novel rows。
+4. quiescence: ±1px terminal height/y jitter 连续四次可稳定；真实 >1px growth、明显移动、pending translation 仍撤销 anchor。
+5. reject diagnostics 要按 reason 计数并保留最近 30 条，不记录正文/DOM dump。
+6. Strict terminal behavior 不变；normal Full Page/Region/Multipart 不在本阶段 diff。

@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { installVisualMutation } from './visual-hooks.mjs';
 export async function testPolicy({page,worker,control,context,id,waitFor,capture,selectRegion,PNG}) {
  for(const [kind,policy] of [['ad','robust'],['ad','strict'],['clean-shift','strict']]){
   await page.goto(new URL('?kind='+kind,page.url()).href);
   const ref=PNG.sync.read(Buffer.from(await page.evaluate(()=>reference),'base64'));
+  await installVisualMutation(worker);
   await capture('full','css',policy);
   const result=await waitFor(s=>!s.busy),v=result.diagnostics.visual;
+  assert.equal(await page.evaluate(()=>visualMutationStatus().changed),true,'mutation must occur during capture');
   assert.equal(result.diagnostics.continuityPolicy,policy);assert.equal(v.continuityPolicy,policy);
   assert.equal(v.bottomTailAccepted,0);
   if(kind==='ad'&&policy==='strict'){
-   assert.equal(result.state,'failed');assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');
+   assert.equal(result.state,'failed',JSON.stringify(result));assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');
    assert.equal(result.parts,0);assert.equal(result.result,undefined);assert.equal(v.visualRecoveryRetries,2);
    assert.equal(v.strictCoverageFailures,3);assert.match(result.message,/智能容错/);
    assert.ok(v.trace.every(t=>t.zones.left.pass===false));
@@ -24,7 +27,6 @@ export async function testPolicy({page,worker,control,context,id,waitFor,capture
   assert.equal(await page.evaluate(()=>scrollY),0);
   console.log('PASS policy',kind,policy);
  }
- // Reopen the actual popup document while the fixture tab remains active.
  const reopen=async()=>{await page.bringToFront();await control.reload();await control.evaluate(()=>preferencesReady)};
  await reopen();
  assert.equal(await control.locator('#robust').isChecked(),true);
@@ -37,7 +39,6 @@ export async function testPolicy({page,worker,control,context,id,waitFor,capture
  assert.deepEqual(await worker.evaluate(async()=> (await chrome.storage.local.get('continuitySitePoliciesV1')).continuitySitePoliciesV1),{});
  assert.equal(await control.locator('#strict').isChecked(),true);
  await reopen();assert.equal(await control.locator('#robust').isChecked(),true);assert.equal(await control.locator('#remember').isChecked(),false);
- // Observe the actual popup START payload without starting a second task.
  await control.evaluate(()=>{chrome.runtime.sendMessage=async message=>{globalThis.sent=message;return {ok:false,error:'test intercept'}};chrome.storage.local.set=async()=>{throw Error('storage unavailable')}});
  await control.locator('#strict').check();await control.locator('#remember').check();await control.evaluate(()=>preferenceWrites);
  assert.match(await control.locator('#preference-status').textContent(),/未保存/);
@@ -45,7 +46,6 @@ export async function testPolicy({page,worker,control,context,id,waitFor,capture
  assert.equal(await control.evaluate(()=>sent.continuityPolicy),'strict');
  await reopen();
  console.log('PASS popup defaults, persistence, removal, storage failure and START policy');
- // Existing basic Region geometry assertion with a Strict START value.
  await page.goto(new URL('?kind=static',page.url()).href);
  const ref=PNG.sync.read(Buffer.from(await page.evaluate(()=>reference),'base64'));
  const job=await capture('region','css','strict');

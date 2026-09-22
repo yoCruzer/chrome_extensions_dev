@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { armAfterFirstBitmap } from './visual-hooks.mjs';
 export async function testBottomTail({page,worker,capture,waitFor,PNG}) {
  for(const kind of ['44','1','upper','not-bottom','growing','late-growing','large','middle','nested']) {
   await page.setViewportSize({width:900,height:kind==='nested'?1000:912});
@@ -27,21 +28,30 @@ export async function testBottomTail({page,worker,capture,waitFor,PNG}) {
     return original(...args);
    };
   });
+  await armAfterFirstBitmap(worker,'armTailMutation');
   await capture('full','css');
   const result=await waitFor(s=>!s.busy),v=result.diagnostics.visual;
-  if(['not-bottom','large','middle'].includes(kind)) {
+  console.log('TAIL_RESULT',JSON.stringify({kind,state:result.state,diagnostics:result.diagnostics}));
+  if(kind==='not-bottom') {
    assert.equal(result.state,'failed',JSON.stringify(result));
    assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');assert.equal(result.parts,0);
    assert.equal(v.bottomTailAccepted,0);assert.ok(v.bottomTailRejected>0);
    assert.equal(v.visualRecoveryRetries,2);
-   if(kind==='middle')assert.ok(v.ambiguousMatches>0);
-   if(kind!=='middle')assert.equal(result.diagnostics.fullProof.trace.at(-1).committedEnd,6384);
+   assert.equal(result.diagnostics.fullProof.trace.at(-1).committedEnd,6384);
   } else {
    assert.equal(result.state,'complete',JSON.stringify(result));
    const ref=PNG.sync.read(Buffer.from(await page.evaluate(()=>reference),'base64'));
    const png=PNG.sync.read(await readFile(result.result.filename));
    assert.equal(png.width,ref.width);assert.equal(png.height,ref.height);
    for(let y=0;y<ref.height;y++)assert.deepEqual(png.data.subarray(y*ref.width*4,(y+1)*ref.width*4),ref.data.subarray(y*ref.width*4,(y+1)*ref.width*4),`${kind} row ${y}`);
+   if(['large','middle'].includes(kind)){
+    // Robust explicitly supports uncertain geometry placement on coherent
+    // low-information/repetitive content. This is not a terminal-tail bypass.
+    assert.ok(v.probablePlacements>0,JSON.stringify(v));
+    assert.ok(v.geometryFallbacks>0,JSON.stringify(v));
+    assert.equal(v.visualFailures,0);
+    if(kind==='middle')assert.ok(v.ambiguousMatches>0);
+   }else{
    assert.equal(v.bottomTailAccepted,1);
    const tail=v.trace.find(t=>t.event==='bottom-tail-anchored');
    assert.equal(tail.result,'BOTTOM_ANCHORED_TAIL');assert.ok(['failed','ambiguous','low-information'].includes(tail.visualResult));
@@ -51,6 +61,7 @@ export async function testBottomTail({page,worker,capture,waitFor,PNG}) {
    assert.ok(v.trace.filter(t=>t.result==='matched').every(t=>t.correction===0));
    if(kind==='44'){assert.equal(result.diagnostics.initialHeight,6364);assert.equal(result.diagnostics.endExtensions,1);assert.equal(tail.novelPixels,44);assert.ok(v.trace.some(t=>t.expectedOffset===44&&t.result==='low-information'));assert.equal(v.trace.filter(t=>t.result==='matched').length,8)}
    if(['growing','late-growing'].includes(kind)){assert.equal(ref.height,6500);assert.equal(result.diagnostics.endExtensions,1)}
+   }
   }
   if(kind==='44'){
    await page.locator('#long-screenshot-v2-progress').getByRole('button',{name:'复制诊断信息'}).click();
@@ -67,5 +78,22 @@ export async function testBottomTail({page,worker,capture,waitFor,PNG}) {
   }
   assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);
   console.log('PASS terminal-tail',kind,JSON.stringify(v));
+ }
+ // Strict must not take Robust's geometry fallback on the same ambiguous or
+ // low-information fixtures. Keep explicit no-output fail-closed coverage.
+ for(const kind of ['large','middle']){
+  await page.setViewportSize({width:900,height:912});
+  await page.goto(new URL('?kind='+kind,page.url()).href);
+  await armAfterFirstBitmap(worker,'armTailMutation');
+  await capture('full','css','strict');
+  const result=await waitFor(s=>!s.busy),v=result.diagnostics.visual;
+  assert.equal(result.state,'failed',JSON.stringify(result));
+  assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');
+  assert.equal(result.parts,0);assert.equal(result.result,undefined);
+  assert.equal(v.bottomTailAccepted,0);assert.equal(v.probablePlacements,0);
+  assert.equal(v.geometryFallbacks,0);assert.equal(v.visualRecoveryRetries,2);
+  assert.equal(await page.evaluate(()=>scrollY),0);
+  assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);
+  console.log('PASS terminal-tail strict fail-closed',kind);
  }
 }

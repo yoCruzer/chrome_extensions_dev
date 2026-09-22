@@ -15,17 +15,26 @@ function paint(seed=0){
 }
 if(!['github','sidebar'].includes(kind))document.querySelector('#island').hidden=true;
 paint();window.reference=c.toDataURL().split(',')[1];
-// A normal-flow leaf witness moves while only a minority overlay changes pixels.
 const witness=document.querySelector('#witness');
 document.querySelector('#island').style.height='3200px';
 if(['github','sidebar'].includes(kind)) {document.querySelector('#island').style.position='relative';document.querySelector('#island').style.height='0px';document.querySelector('#island').prepend(witness);document.querySelector('#layout').prepend(document.querySelector('#island'))}
-let changed=false;
-addEventListener('scroll',()=>{
+// Armed after the first real bitmap; the next scroll owns the layout change.
+// Pre-scroll warm-up is discovery, not the capture-time mutation under test.
+let changed=false,armed=false,armCount=0,preCaptureScrolls=0;
+function mutateOnScroll(){
+ if(!armed){if(scrollY>=100)preCaptureScrolls++;return}
  if(changed||scrollY<100)return;changed=true;
  if(kind==='github'||kind==='global'||kind==='clean-shift')document.querySelector('#spacer').style.height=(kind==='global'?80:45)+'px';
  if(kind==='sidebar'){document.querySelector('#island').style.transform='translateY(20.617px)';ctx.fillStyle='#d09030';ctx.fillRect(0,0,180,c.height)}
  if(kind==='ad'){ctx.fillStyle='#f0c020';ctx.fillRect(0,0,240,c.height)}
  if(kind==='islands'){ctx.fillStyle='#30c060';ctx.fillRect(0,0,100,c.height);ctx.fillRect(800,0,100,c.height)}
+ if(kind==='edge-heavy'){ctx.fillStyle='#cc6030';ctx.fillRect(0,0,300,c.height);ctx.fillRect(750,0,150,c.height)}
  if(kind==='unrelated')paint(987654);
-});
+}
+window.armVisualMutation=()=>{
+ if(armed||changed||scrollY!==0)throw Error('Visual fixture must arm unchanged at the capture top');
+ armed=true;armCount++;
+};
+window.visualMutationStatus=()=>({armed,changed,armCount,preCaptureScrolls});
+addEventListener('scroll',mutateOnScroll);
 </script>

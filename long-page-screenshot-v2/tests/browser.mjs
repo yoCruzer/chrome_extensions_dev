@@ -63,12 +63,27 @@ try {
   const message = value => control.evaluate(value => chrome.runtime.sendMessage({ target: "background", ...value }), value);
   const waitFor = async predicate => {
     const start = Date.now();
+    let state;
+    const fail = async reason => {
+      const report = { reason, expected: String(predicate), elapsedMs: Date.now() - start, state };
+      await writeFile(join(root, 'capture-wait-failure.json'), JSON.stringify(report, null, 2));
+      await page.screenshot({path: join(root, 'capture-wait-failure.png')}).catch(() => {});
+      throw new Error(`${reason}: ${JSON.stringify(report)}`);
+    };
     while (Date.now() - start < 180_000) {
-      const state = await message({ type: "STATUS" });
-      if (predicate(state)) return state;
+      state = await message({ type: "STATUS" });
+      if (predicate(state)) {
+        if (!state.busy && ['complete', 'failed', 'cancelled'].includes(state.state)) {
+          await writeFile(join(root, 'capture-terminal-state.json'), JSON.stringify(state, null, 2));
+        }
+        return state;
+      }
+      if (!state.busy && ['complete', 'failed', 'cancelled'].includes(state.state)) {
+        await fail('Capture ended before the expected checkpoint');
+      }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    throw new Error("Timed out waiting for capture state");
+    await fail('Timed out waiting for capture state');
   };
   const capture = async (mode, output = "auto", continuityPolicy) => {
     await page.bringToFront();
@@ -121,7 +136,7 @@ try {
     await testDynamicRegion({ page, worker, message, waitFor, capture, selectRegion, PNG });
   } else if (process.env.OUTPUT_ONLY) {
     const panel = page.locator("#long-screenshot-v2-progress");
-    for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5], ["device", 1]]) {
+    for (const [output, ratio] of [["auto", .9], ["css", 1], ["75", .75], ["50", .5], ["device", 1]]) {
       const job = await capture("region", output);
       await selectRegion(job, { left: 0, top: 0, right: 800, bottom: 1800 });
       await waitFor(s => s.state === "loading");
@@ -161,26 +176,33 @@ try {
     console.log("PASS page-panel cancel and persistent completion close");
     await page.evaluate(() => { document.querySelector("canvas").style.width = "1500px"; document.querySelector("canvas").style.height = "26000px"; });
     await capture("full", "css");
-    const oversized = await waitFor(s => !s.busy);
-    assert.equal(oversized.state, "failed"); assert.match(oversized.message, /自动/);
-    assert.equal(oversized.metrics.captures, 0);
+    const cssLong = await waitFor(s => !s.busy);
+    assert.equal(cssLong.state, "complete", JSON.stringify(cssLong));
+    assert.equal(cssLong.parts, 2);
+    assert.equal(cssLong.results.length, 2);
+    assert.notEqual(cssLong.results[0].filename, cssLong.results[1].filename);
+    const cssPNGs = await Promise.all(cssLong.results.map(async item => PNG.sync.read(await readFile(item.filename))));
+    assert.deepEqual(cssPNGs.map(png => [png.width, png.height]), [[900, 16384], [900, 9616]]);
+    assert.equal(cssPNGs.reduce((sum, png) => sum + png.height, 0), 26000);
+
     await capture("full", "auto");
-    const reduced = await waitFor(s => !s.busy);
-    assert.equal(reduced.state, "complete", JSON.stringify(reduced));
-    assert.equal(reduced.parts, 1);
-    const reducedPNG = PNG.sync.read(await readFile(reduced.result.filename));
-    assert.ok(reducedPNG.width * reducedPNG.height <= 16000000);
-    assert.equal(reducedPNG.height, 16384);
-    for (let y = 0; y < reducedPNG.height; y++) assert.equal(reducedPNG.data[(y * reducedPNG.width + 10) * 4 + 2], 97);
-    const bottom = ((reducedPNG.height - 1) * reducedPNG.width + 10) * 4;
-    assert.ok(Math.abs(reducedPNG.data[bottom] - (10336 % 251)) <= 2);
-    assert.equal(reducedPNG.data[bottom + 1], Math.floor(10336 / 251));
+    const balanced = await waitFor(s => !s.busy);
+    assert.equal(balanced.state, "complete", JSON.stringify(balanced));
+    assert.equal(balanced.parts, 2);
+    assert.equal(balanced.results.length, 2);
+    const autoPNGs = await Promise.all(balanced.results.map(async item => PNG.sync.read(await readFile(item.filename))));
+    assert.deepEqual(autoPNGs.map(png => [png.width, png.height]), [[810, 16384], [810, 7016]]);
+    assert.equal(autoPNGs.reduce((sum, png) => sum + png.height, 0), 23400);
+    const panelText = await panel.locator("section").innerText();
+    assert.ok(panelText.includes(balanced.results[0].filename));
+    assert.ok(panelText.includes(balanced.results[1].filename));
+
     await page.evaluate(() => { document.querySelector("canvas").style.height = "1000000px"; });
     await capture("full");
     const extreme = await waitFor(s => !s.busy);
-    assert.equal(extreme.state, "failed"); assert.match(extreme.message, /缩小截图区域/);
+    assert.equal(extreme.state, "failed"); assert.match(extreme.message, /需要 .* 张图片|缩小区域/);
     assert.equal(extreme.metrics.captures, 0);
-    console.log("PASS Auto reduction, single PNG, bottom, fixed-size and extreme preflight rejection");
+    console.log("PASS balanced Auto and CSS multi-part output with ordered files and extreme part-count guard");
   } else if (process.env.COMPLEX_ONLY) {
     await testComplexPage({ page, worker, message, waitFor, capture, selectRegion, root, PNG });
   } else if (process.env.NATIVE_DPR) {
@@ -196,7 +218,7 @@ try {
     console.log("PASS native device scale", process.env.NATIVE_DPR, png.width, png.height);
     assert.equal((await message({ type: "SHOW", id: result.id })).ok, true);
     console.log("PASS real Chrome downloads.show API");
-    for (const [output, ratio] of [["auto", 1], ["css", 1], ["75", .75], ["50", .5]]) {
+    for (const [output, ratio] of [["auto", .9], ["css", 1], ["75", .75], ["50", .5]]) {
       const job = await capture("region", output);
       await selectRegion(job, { left: 200, top: 100, right: 700, bottom: 1700 });
       const done = await waitFor(s => !s.busy);
@@ -213,7 +235,7 @@ try {
       assert.equal(result.state, "complete", JSON.stringify(result));
       const png = PNG.sync.read(await readFile(result.result.filename));
       const ratio = output === "device" ? Number(process.env.NATIVE_DPR) : 1;
-      assert.equal(png.width, 1500 * ratio); assert.equal(png.height, 1800 * ratio);
+      assert.equal(png.width, 900 * ratio); assert.equal(png.height, 1800 * ratio);
       for (let y = 0; y < png.height; y++) assert.equal(png.data[(y * png.width + 100) * 4 + 2], 97);
       assert.ok(result.diagnostics.visual.visualChecks > 0);
       console.log("PASS native Retina Full Page visual", output, png.width, png.height);
@@ -241,7 +263,7 @@ try {
   } else {
   await page.evaluate(() => scrollTo({ left: 123, top: 321, behavior: "instant" }));
   if (!process.env.EXTRA_ONLY) {
-  await capture("full");
+  await capture("full", "css");
   const full = await waitFor(s => !s.busy);
   assert.equal(full.state, "complete", JSON.stringify(full));
   assert.equal(full.parts, 1); console.log("FAST", JSON.stringify(full));
@@ -251,9 +273,9 @@ try {
   let row = 0;
   for (const file of files) {
     const png = PNG.sync.read(await readFile(file.filename));
-    assert.equal(png.width, 1500);
+    assert.equal(png.width, 900);
     for (let y = 0; y < png.height; y++, row++) {
-      for (const x of [0, 800, 1499]) {
+      for (const x of [0, 450, 899]) {
         const offset = (y * png.width + x) * 4;
         assert.deepEqual([...png.data.subarray(offset, offset + 3)], [row % 251, Math.floor(row / 251), 97], `row=${row} x=${x}`);
       }
@@ -261,22 +283,17 @@ try {
   }
   assert.equal(row, 10337);
   assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.getElementById("fixed").style.visibility]), [123, 321, ""]);
-  console.log("PASS full: exact rows across horizontal/vertical tiles in one PNG, bottom and page restoration");
+  console.log("PASS full: current 900px horizontal slice, exact vertical rows, bottom and page restoration");
 
-  await capture("region");
-  await page.screenshot({ path: join(root, "selection.png") });
-  // Exercise both picker buttons across a scroll, including the closed Shadow DOM UI.
-  await page.mouse.click(642, 245);
-  await page.mouse.click(107, 392);
-  await page.evaluate(() => scrollTo({ left: 0, top: 2500, behavior: "instant" }));
-  await page.mouse.click(730, 245);
-  await page.mouse.click(870, 369);
-  await page.mouse.click(811, 245);
+  const regionJob = await capture("region", "css");
+  // Base regression verifies the Phase 2.3 coordinate contract directly:
+  // horizontal edges are browser-viewport x; vertical edges are content y.
+  await selectRegion(regionJob, { left: 107, top: 713, right: 870, bottom: 2869 });
   const region = await waitFor(s => !s.busy);
   assert.equal(region.state, "complete", JSON.stringify(region));
   const [regionFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
   const png = PNG.sync.read(await readFile(regionFile.filename));
-  assert.equal(png.width, 640); assert.equal(png.height, 2156);
+  assert.equal(png.width, 763); assert.equal(png.height, 2156);
   for (let y = 0; y < png.height; y++) {
     const offset = y * png.width * 4;
     assert.deepEqual([...png.data.subarray(offset, offset + 3)], [(y + 713) % 251, Math.floor((y + 713) / 251), 97]);
@@ -288,7 +305,10 @@ try {
     await chrome.tabs.setZoom(tab.id, 1.25);
   });
   const zoomJob = await capture("region", "device");
-  await selectRegion(zoomJob, { left: 200, top: 100, right: 840, bottom: 2260 });
+  const zoomViewportWidth = await page.evaluate(() => innerWidth);
+  assert.ok(zoomViewportWidth >= 640, `zoomed viewport too narrow: ${zoomViewportWidth}`);
+  const zoomLeft = Math.floor((zoomViewportWidth - 640) / 2);
+  await selectRegion(zoomJob, { left: zoomLeft, top: 100, right: zoomLeft + 640, bottom: 2260 });
   const zoomResult = await waitFor(s => !s.busy);
   assert.equal(zoomResult.state, "complete", JSON.stringify(zoomResult));
   const [zoomFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
@@ -306,7 +326,7 @@ try {
   });
 
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 2, mobile: false });
-  const retinaJob = await capture("region");
+  const retinaJob = await capture("region", "css");
   await selectRegion(retinaJob, { left: 200, top: 100, right: 700, bottom: 1700 });
   const retinaResult = await waitFor(s => !s.busy);
   assert.equal(retinaResult.state, "complete", JSON.stringify(retinaResult));
@@ -346,18 +366,18 @@ try {
     }
     addEventListener("scroll", grow);
   });
-  await capture("full");
-  const lazy = await waitFor(s => !s.busy);
-  // Rescaling all previously painted content has no translational overlap.
-  assert.equal(lazy.state, "failed", JSON.stringify(lazy));
-  assert.equal(lazy.reasonCode, "VISUAL_CONTINUITY_FAILED");
-  assert.equal(lazy.result, undefined);
-  await capture("full");
+  await capture("full", "css");
+  const warmedGrowth = await waitFor(s => !s.busy);
+  assert.equal(warmedGrowth.state, "complete", JSON.stringify(warmedGrowth));
+  assert.ok(warmedGrowth.diagnostics.warmup.growthEvents >= 1, JSON.stringify(warmedGrowth.diagnostics.warmup));
+  let [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
+  assert.equal(PNG.sync.read(await readFile(lazyFile.filename)).height, 2800);
+  await capture("full", "css");
   const stableGrowth = await waitFor(s => !s.busy);
   assert.equal(stableGrowth.state, "complete", JSON.stringify(stableGrowth));
-  const [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
+  [lazyFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
   assert.equal(PNG.sync.read(await readFile(lazyFile.filename)).height, 2800);
-  console.log("PASS global content rescale: bounded visual failure, stable recapture includes final bottom");
+  console.log("PASS bounded warmup absorbs initial growth; stable recapture includes final bottom");
 
   await capture("full");
   await waitFor(s => s.state === "capturing");

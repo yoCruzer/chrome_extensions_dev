@@ -5,10 +5,10 @@
 ## 安装与截图
 
 1. Chrome 116+ 打开 `chrome://extensions`，启用开发者模式，加载本目录。
-2. 在普通网页点击扩展图标，选择输出尺寸，然后选择「截取整页」或「选择截图区域」。
+2. 在普通网页点击扩展图标，选择输出尺寸，然后选择「截取整页」或「选择截图区域」。Full Page 当前只沿**垂直方向**滚动；横向保持启动截图时的实际可见位置/宽度，不主动横向滚动。
 3. 区域模式点选左上角，滚动后再点选右下角，两角跟随所选 DOM 内容；也可以填写四条 CSS 坐标边界，使用固定坐标模式。
 4. 弹窗关闭后，页面右下角继续显示准备、等待内容稳定、截图帧数／进度、生成图片和保存状态。可点击面板「取消」或按 Esc。
-5. 完成后得到 **一张 PNG**。面板保留实际文件名、完整保存路径、像素尺寸和文件大小，直到手动关闭；点击「在 Finder 中显示」定位文件。
+5. 完成后优先得到 **一张 PNG**；超出单个安全画布时自动拆成多张连续 PNG。面板列出每张图片的实际路径、像素尺寸和文件大小；点击「在 Finder 中显示」定位第一张。
 
 截图时保持目标标签页在前台，窗口大小及缩放不变。本地 HTML 需要在扩展详情开启「允许访问文件网址」。
 
@@ -16,13 +16,13 @@
 
 | 选项 | 语义 |
 | --- | --- |
-| 自动 · 单图优先（默认） | 在安全预算内选尽可能高的比例，上限为 CSS 100% 和实际源图比例；超长页自动缩小 |
-| 网页 100% | 1 CSS 像素约等于 1 输出像素，不随 Retina 默认翻倍 |
+| 自动 · 平衡（默认） | 目标约 CSS 90%（不超过实际源图比例）；强调“够清晰 + 适中文件体积”，超长时保持该比例并自动分片 |
+| 网页 100% | 1 CSS 像素约等于 1 输出像素；更清晰但总体像素/文件通常比 Auto 多约 23% |
 | 75% | CSS 宽高分别乘 0.75 |
 | 50% | CSS 宽高分别乘 0.5 |
 | 原始设备分辨率 | 按 `captureVisibleTab` 实际位图／视口比例输出，通常文件最大 |
 
-尺寸按最终绝对边界四舍五入。单图最多 16,000,000 像素，任一边最多 16,384 像素。固定比例超限会明确提示改用自动、更低比例或缩小区域，**不会静默输出 part 文件**。Auto 需要缩到 CSS 25% 以下时明确失败，建议缩小区域。Full Page 设备模式先按页面 DPR 做保守预算检查；Region 不用 DPR 决定源像素比例，设备模式以实际首帧位图复核尺寸；浏览器模拟 DPR 与真实位图不同的场景以实际图像决定最终输出。
+尺寸按最终绝对边界四舍五入。**每个 PNG part** 最多约 16,000,000 像素，任一边最多 16,384 像素；总截图可以超过这个范围并自动按纵向拆分。Auto 固定目标约 CSS 90%，不会为了强塞一张图继续降低清晰度；CSS/75%/50%/Device 也保持各自请求比例并在必要时分片。当前单次最多 24 个 part，超过时明确提示选择 75%/50% 或缩小区域。Full Page 设备模式先按页面 DPR 做保守预算检查；Region 不用 DPR 决定源像素比例，设备模式以实际首帧位图复核尺寸；浏览器模拟 DPR 与真实位图不同的场景以实际图像决定最终输出。
 
 ## 保存位置
 
@@ -34,10 +34,10 @@
 
 - 普通页面单遍处理：滚到当前块，等待几何和可见图片稳定，立即截图并绘制，再前往下一块；不再无条件完整预滚动一遍。
 - 整页每块至少约 480 ms、区域约 240 ms 稳定等待；区域等待比较局部几何，不等待整个 document 静止。可见图片或局部几何在 5 秒内仍不稳定就有界重试／失败。截图调用间隔至少 550 ms，遵守 Chrome 限流。
-- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除要求视觉验证，不再触发整页重启。普通中间帧匹配失败最多重采两次，再以 `VISUAL_CONTINUITY_FAILED` 停止且不下载 PNG。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
-- 支持横向及纵向拼接，以实际可见坐标裁剪、按绝对输出边界取整，避免累计接缝误差。
+- 整页允许底部追加和有界视觉位移：相邻帧保留重叠，通过 tile 共识对齐并只写新增像素。witness 移动／变形／删除作为证据，不直接触发整页重启。Robust 在两次有界 recovery 后若仍只是 `ambiguous`／`low-information`，可显式以 `probable` placement 完成：有 ≥3 个高质量 tile 同意同一候选时优先保留该 visual correction，否则使用经过前后截图验证的 observed scroll geometry；`failed`／强矛盾仍停止。Strict 不使用该 fallback。底部每 200ms 采样，连续 4 次高度稳定且可见图片加载完才结束，单次底部等待最多 3 秒。
+- Full Page 只做纵向拼接：输出宽度等于正式截图开始时 CaptureTarget 的实际可见宽度，保持当时实际 x；document/target 的更大 scrollWidth 不会触发横向遍历或失败。Region 仍可截取用户明确选择的二维矩形。所有绘制按绝对输出边界取整，避免累计接缝误差。
 - 页面状态面板使用 Shadow DOM。截图前隐藏，并等待两次动画帧重绘；截图后恢复，面板不进入最终 PNG。
-- 通常仅保留当前帧和一个有界画布；动态扩展时短暂保留新旧两个画布，拷贝后立即释放旧画布。Auto 扩展超出原比例预算时会下采样已有像素；逐帧释放 ImageBitmap／data URL，不累积源截图数组。画布 RGBA 预算约 61 MiB，另有源帧、编码和浏览器自身开销；这不是浏览器总 RSS 上限。
+- 通常仅保留当前帧和**一个有界 part canvas**。part 写满后立即编码并释放 canvas，再继续下一 part；动态高度增长只增加总高度／partCount，不改变已选输出比例，也不再下采样已提交像素。逐帧释放 ImageBitmap／data URL，不累积源截图数组。单个 part 的 RGBA 预算仍约 61 MiB，另有已编码 Blob、源帧和浏览器自身开销；这不是浏览器总 RSS 上限。
 - 编码完成后释放画布，下载完成后撤销 Blob URL。成功、失败、取消均恢复原始滚动及临时改动的内联样式与优先级。
 - 任务 ID 隔离过期消息；worker 重启清理旧任务并提示中断。启动时残留 offscreen 关闭失败不会永久阻塞 ready，后续新任务会再次清理。页面端另有 30 秒租约恢复机制。
 - 最多 1000 次截图、15 分钟、12 次终点扩展，终点不超过初始高度两倍与初始高度加 4 屏中的较大值；持续增长会提示改用选择区域。
@@ -60,11 +60,11 @@ Element Full Page 复用 Region 的 CaptureTarget、targetView、scroll restorat
 
 点击开始后，在捕获布局上建立环境基线：目标 tab、`innerWidth/innerHeight`、`chrome.tabs.getZoom()` 和 `visualViewport.scale`。scale 使用 `0.0001` epsilon；clientWidth/clientHeight、document 宽高和 DPR 仅记录诊断，不是 Region fatal invariant。不会拿最初 BEGIN 的页面快照永久比较。真实位图决定源像素比例，拼图仍拒绝不一致的实际 bitmap 尺寸。
 
-首帧提交前，当前可解析且稳定的区域成为 Attempt 1 基线；未提交的首帧布局变化最多重新采样两次。捕获期间重新解析锚点，纯平移重定位滚动及帧坐标，不重启整个画布；位图获取前后发生平移会丢弃未提交帧，最多重采两次。画布建立后首次区域宽高实质变化，销毁临时 canvas/offscreen，自动建立 Attempt 2 并采用稳定的新区域尺寸，不要求重新点选。Attempt 2 再次出现尺寸变化或无法稳定时，提示「所选区域持续发生布局变化，请稍后重试」，不输出 PNG。
+开始截图前最后一次解析 anchors 后，Region 的输出宽高与 Target-local Scope 被冻结。捕获期间继续尝试解析 anchors，但只用于估计 rigid translation 并将实际帧映回 frozen Scope；不会因为两角距离变化而扩大／缩小输出。anchor 临时失效时沿用最后一次可用 runtime region（若无则 frozen region）并记录诊断，不把它当成已提交画布的致命错误。captureVisibleTab 前后的纯平移采用最接近截图时刻的 post-capture mapping，不再仅因平移丢弃帧。目标滚动位置、目标容器可见尺寸、窗口／zoom 等真正环境变化仍保留失败／重建保护。Region 尺寸比较使用 0.5 CSS px epsilon，避免亚像素 jitter。
 
 等待仅检查当前滚动、解析后的区域几何和当前选区内可见图片，每次最多 5 秒。截图前隐藏扩展 UI，并复核位图前后几何。不再遍历整个 DOM 构建 scope 指纹，无关节点替换、广告变化或文档增长不会单独终止 Region。
 
-状态接口及 `chrome.storage.session` 中的 `status` 保留 `reasonCode`、`attempt`、`diagnostics`：环境 baseline/actual、具体差异字段、两角 connected／原始及当前 rect／resolved point／resolver mode，以及区域 before/current。例：`CAPTURE_ENV_CHANGED: innerWidth 900 -> 880`。其它代码包括 `ANCHOR_UNRESOLVABLE`、`REGION_INVALID`、`REGION_REFLOW`、`FRAME_NOT_SETTLED` 和目标 tab 变化；不记录 DOM 或正文文本。
+状态接口及 `chrome.storage.session` 中的 `status` 保留 `reasonCode`、`attempt`、`diagnostics`：环境 baseline/actual、具体差异字段、两角 connected／原始及当前 rect／resolved point／resolver mode、区域 before/current，以及 `regionDiagnostics.anchorResolutions / anchorFallbacks / shapeChanges`、background 的 `regionRebases / regionCaptureRebases`。例：`CAPTURE_ENV_CHANGED: innerWidth 900 -> 880`。开始冻结前仍可能出现 `ANCHOR_UNRESOLVABLE`／`REGION_INVALID`；冻结后这些 anchor 事件降为 fallback 证据。不会记录 DOM 或正文文本。
 
 Full Page diagnostics 包含 `initialHeight`、`maxObservedHeight`、`endExtensions`、`bottomStableSamples`、`fullPageRestarts`、`terminationReason`。正常结束为 `BOTTOM_QUIESCENT`，无限增长预算为 `FULL_GROWTH_LIMIT`，无法建立视觉连续性为 `VISUAL_CONTINUITY_FAILED`；不记录正文或 DOM dump。
 
@@ -72,11 +72,11 @@ Full Page diagnostics 包含 `initialHeight`、`maxObservedHeight`、`endExtensi
 
 fixed/sticky 仍采用原有可见性、尺寸及位置启发式，结束后恢复。Full Page 的普通流叶元素矩形仅提供几何警告；普通中间帧最终由相邻图像的有界视觉连续性决定拼接，严格底部小尾段另见下方 terminal anchor。DOM mutation 只标记 dirty 并触发几何复核，不构建语义 DOM 或全文指纹；最多记录 20,000 个几何见证。初始普通元素在滚动后才变为 fixed/sticky 的网站仍可能重复吸顶栏。
 
-不支持虚拟列表、无限 feed、iframe 内部独立滚动、任意二维嵌套滚动、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。持续可观察的选区 reflow 会有界失败；固定数字坐标不承诺跟随内容重排。锚点是按边缘距离／比例解析的视觉点，不是字符或语义位置；请点在目标内容上，空白页面容器不是正文锚点。没有 AI、OCR、正文识别、网站适配器或编辑器。
+不支持虚拟列表、无限 feed、iframe 内部独立滚动、任意二维嵌套滚动、触控捏合缩放及浏览器受限页面。不遍历 Shadow DOM 内部固定元素，不展开折叠内容。不冻结页面 JavaScript；相同外框内的语义替换、视频、Canvas 动画、仅 CSS 绘制变化、Shadow DOM 内部变化及检查间瞬间变化后恢复的内容无法保证跨帧一致性。Region 是用户确认时冻结的视觉矩形：截图中途若内部内容增删／重排，输出不会自动扩展去追踪新的语义边界，因此可能形成时间复合图或截掉后来新增的尾部内容；固定数字坐标同样不承诺跟随内容重排。锚点是帮助解析与 rebase 的视觉点，不是字符或语义位置。没有 AI、OCR、正文识别、网站适配器或编辑器。
 
 ## 开发与测试
 
-`background.js` 协调任务；`content.js` 负责页面 UI、测量、滚动及恢复；`offscreen.js` 串行拼图；`capture/` 集中处理几何及块规划。保留内部 PART 协议，但默认流程只创建一个完整输出画布并下载一次。
+`background.js` 协调任务；`content.js` 负责页面 UI、测量、滚动及恢复；`offscreen.js` 串行拼图；`capture/` 集中处理几何及块规划。PART 协议现在用于滚动分片输出：同一 Capture Session 只保留一个活动 canvas，最终可下载一张或多张 PNG。
 
 ```sh
 node --test long-page-screenshot-v2/tests/*.test.mjs
@@ -93,10 +93,28 @@ ADAPTIVE_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 PROOF_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 FULL_NESTED_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 DIAGNOSTICS_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
+POLICY_ONLY=1 node long-page-screenshot-v2/tests/browser.mjs
 NATIVE_DPR=2 node long-page-screenshot-v2/tests/browser.mjs
 ```
 
 测试需要 Node 22+，Chrome 集成另需 Playwright 和 pngjs；可通过 `NODE_PATH` 和 `CHROME_EXECUTABLE` 指定。使用临时配置及下载目录，正式 manifest 不增加主机权限；通过真实扩展 `captureVisibleTab`、offscreen 和 downloads 验证，不以自动化截图替代截图引擎。
+
+阶段结束前的完整回归可用一条命令执行：
+
+```sh
+bash long-page-screenshot-v2/tests/final-regression.sh
+```
+
+脚本要求 clean working tree，自动记录 branch/HEAD/Node/Chrome，并串行执行 Node 全量和 15 个 Chrome 分组；每组日志写入系统临时目录，首个失败即停止，避免手工漏跑或重复跑完整矩阵。
+
+### GitHub Actions CI
+
+仓库的 `.github/workflows/long-page-screenshot-v2-ci.yml` 复用同一测试入口：
+
+- 普通 PR 更新只跑 Node 单测，避免每个开发提交都触发昂贵的完整浏览器矩阵；
+- `workflow_dispatch`、PR 标记 Ready、以及 `main` 更新时运行完整 `final-regression.sh`；
+- CI 固定 Node 24.21.0，并在 runner 临时目录安装固定版本的 Playwright / pngjs 与 Chromium；
+- 成功或失败都会上传 regression logs artifact。Linux/Chromium CI 是自动回归证据，不能替代最终 Mac Chrome + 真实页面人工验收。
 
 本地复杂 fixture：`tests/fixtures/test-complex-page.html`，包含固定顶栏、sticky 侧栏、18 张延迟图片、定时增高和正文边框。新增动态 fixture：`long-page-screenshot-v2/tests/fixtures/test-dynamic-region-page.html`，以完整参考像素验证动态 banner、一次 resize 及重复 reflow。`test-csdn-like-page.html` 和 `test-chat-like-page.html` 分别复现 scrollbar／动态文章和 flex/grid 聊天布局中的两类误报。详见 [TESTING.md](TESTING.md)。
 
@@ -129,7 +147,7 @@ Popup「整页连续性」默认使用 **Robust / 智能容错**，保留原多�
 - 共识：灰度标准差至少 5，采样行间的平均垂直变化至少 0.05（排除只在横向有边框、纵向恒定的 tile）；至少 3 个 informative tiles，且至少 60% 同意同一个整数 CSS 位移。最佳归一化平均绝对误差 ≤0.04，灰度及最佳候选 RGB 平均误差均 ≤0.5（0–255）。第二候选误差差距至少 `min(0.018, max(0.005, bestError * 0.5))`；近乎精确匹配允许较小差距，噪声近似匹配不能靠相邻 offset 猜测。分数为 `1/(1+error)`，confidence 为 agreementRatio × bestScore。
 - canonical 坐标：首帧起点 0；后续为上一帧 canonicalY + matchedOffset。只绘制上次 committed end 之后的部分，源裁剪仍使用当前目标视口。文档高度用于滚动终点和增长保护，最终 PNG 高度按 canonical end 裁定，不加入因坐标修正产生的空白尾带。
 - 失败：第一次重试在原位置重新 settle/capture；第二次后退一个有界 overlap（最多 320px），增加共享内容。两次后仍无可靠匹配则停止，不重启整个截图、不输出部分 PNG；Robust 的唯一例外是下方经过验证的 terminal bottom tail。目标丢失、导航、环境变化和无限增长保护继续生效；容器 viewport resize 仍使用原有一次重建策略。
-- 横向超宽页：每个纵向 band 的首列建立视觉注册，其它横向列沿用该 band 的 canonical 坐标和原有几何裁剪。因此对跨列独立纵向变形不作保证；主要模型仍是纵向截图。
+- 横向语义：Full Page 不再遍历横向超宽内容；visual matcher 只在当前可见水平切片内部取 12 个横向 tiles 来判断**纵向**位移。需要页面其它横向区域时，先由用户把页面横向滚到希望的位置后再开始 Full Page，或使用 Region。
 
 `diagnostics.visual` 包含 `visualChecks`、`visualFastPath`、`visualRecoveries`、`visualRecoveryRetries`、`visualFailures`、`ambiguousMatches`、`lowInformationRejects`，及最近 150 次匹配 trace（预计／实际位移、修正、搜索半径、重叠、tile 数、共识比例、两候选分数、confidence、path、result）。复制诊断包含这些安全数值，不包含像素、页面文本、HTML、URL、图片数据。
 
@@ -152,3 +170,172 @@ Canonical 映射为 `canonicalY = finalExtent - viewportHeight`、`novelTop = ca
 `diagnostics.visual` 新增 `bottomTailChecks`、`bottomTailAccepted`、`bottomTailRejected`；一次检查未使用 anchor（包括新截图已视觉匹配）计入 rejected。接受时 trace 记录 `event=bottom-tail-anchored`、`result=BOTTOM_ANCHORED_TAIL`、原 `visualResult`、finalExtent、canonicalEndBefore、remainingTail、actualTargetScrollY、maxTargetScrollY、viewportHeight 和 novelPixels。正常视觉成功不标记 fallback，任务仍以正常成功结束；原复制诊断入口保留。
 
 GitHub 多数 tiles 确定的一维全局对齐可能让少数动态 sidebar／toolbar 留下局部 seam artifact。Robust 保留底部小尾段策略；Strict 可拒绝此类局部冲突，但不增加 per-tile 坐标、seam carving 或语义侧栏识别。底部稳定仍是有界时间观测，不保证未来不再加载；不追溯改写已提交前缀，也不保证任意动态内容的最终时刻快照。Region runtime 和 CaptureTarget detection 未改变。
+
+## Completion-First Reset — Phase 1（Robust probable placement）
+
+开发分支：`feature/completion-first-reset`，基线 `5c86a5962676caadbfc78819e7742c25984afc33`。
+
+本阶段只改变 Full Page Robust 的最终 admission policy，不修改 Region、Strict、Warm-up、Multi-part、权限或 manifest。
+
+流程仍然是 visual-first：
+
+1. normal matcher；
+2. 同位置重采；
+3. 增大共享上下文的最终 recovery；
+4. 最终结果若为 `matched`，沿用原 visual canonical placement；
+5. 最终仍为 `ambiguous` 时：
+   - 若至少 `VISUAL.minTiles` 个高质量 tiles 对同一 candidate offset 达成一致，记录 `continuity=probable / fallbackMethod=probable-visual` 并使用该 bounded correction；
+   - 否则 Robust 使用 observed geometry，记录 `fallbackMethod=geometry`；
+6. `low-information` 在 observed geometry coherent 时可走 geometry probable；
+7. `failed`、真实 gap、target/environment/viewport/zoom 变化仍 fail closed；
+8. Strict 完全保持 verified-only，不接受 Robust fallback。
+
+Diagnostics 新增 `probablePlacements`、`geometryFallbacks`、`probableVisualCorrections`；trace 保留原 visual result，同时记录 `continuity`、`fallbackMethod`、`placementOffset`、`placementCorrection`，避免把 fallback 冒充成 verified match。
+
+### Completion-First Reset — Phase 1.1（Bounded Warm-up + evidence diagnostics）
+
+Full Page 在正式建立 proof/canvas 之前先做一次**有界预滚**，用于触发首轮 lazy load、sticky/layout 状态和有限尾部增长：
+
+- 从 CaptureTarget 顶部开始，以约 0.9 viewport 步进；
+- 最多 24 步、15 秒、6 次增长事件；
+- 高度超过 warmup 初始高度的 2× 或 +4 viewport 中较大值时停止追增长；
+- 到达物理底部且下一次 settle 不再增长时记为 `bottom-stable`；
+- warmup 的普通 settle 超时是 discovery failure，不直接宣告截图失败；返回顶部后仍进入正式 capture；
+- target/environment/cancel 等真正环境错误仍立即终止；
+- warmup 完成后回到顶部，随后才 `FULL_RESET` 并建立正式 proof，因此 warmup 帧不会进入画布或 committed witness。
+
+复制 diagnostics 新增安全数值 `warmup`；visual trace 新增 `qualityTiles`、`qualityRatio` 和 `failureReason`（`low-information / insufficient-consensus / insufficient-quality / width-mismatch / insufficient-overlap / strict-zone`）。本阶段仍**不**把 `insufficient-quality` 自动放行，只用于确认 GitHub/CSDN 当前的真实失败类型。
+
+## Completion-First Reset — Phase 2（Vertical-only Full Page + Region Scope Freeze/Rebase）
+
+### Full Page
+
+Full Page 的 Scope 现在明确为“**当前水平切片 × 完整垂直范围**”：
+
+- warm-up 记录启动时实际 `view.x`，整个预滚和正式 capture 只改变 y；
+- 正式起点以 warm-up 返回顶部后的实际 x 为准；
+- 输出 `region.x = actual view.x`，`region.width = actual clientWidth`；
+- `scrollWidth` 仅作为 diagnostics，不作为输出宽度，不规划第二横向 column；
+- offscreen 不再因为“未到达计划横向位置”终止；
+- 页面/容器的 reported width 变化本身不再使 Full Page 失败；
+- diagnostics `full.horizontal` 记录 `mode=viewport-slice / x / visibleWidth / reportedWidth`。
+
+### Region
+
+Region 在 preparation 后最后一次解析 anchors，并冻结 `s.region` 的目标坐标/宽高作为本次输出 Scope。capture 期间：
+
+- anchors 若仍可解析，只提供当前平移量；实际截图 view 通过 `relativeView` 映回 frozen Scope；
+- anchor separation/尺寸变化只记 `shapeChanges`，不再自动改变输出尺寸；
+- anchor 临时失效时使用最后一次可用 runtime region／frozen region，记录 `anchorFallbacks`，不立即宣告失败；
+- 帧与帧之间的 rigid translation 可直接 rebase；
+- captureVisibleTab 前后的 region/viewportRect 平移使用 post-capture mapping 作为最近观测值并记录 `regionCaptureRebases`；
+- 真正的 target/viewport/zoom/滚动位置变化仍保留环境或 FRAME_MOVED 保护；
+- 尺寸比较使用 0.5 CSS px epsilon，避免亚像素 jitter 误判。
+
+## Completion-First Reset — Save-name hardening + probable-score（2026-09-20）
+
+- 下载建议名不再按“80 个 JS 字符”截断；中文/emoji 可能一个字符占 3–4 UTF-8 bytes，因此标题现在在清洗非法路径字符后按 **160 UTF-8 bytes** 截断，整个 basename 保留充足文件系统余量且不会切断 surrogate pair。
+- 如果 Chrome 仍返回 `Invalid filename`，自动重试固定安全名 `LongScreenshot/<timestamp>-capture.png`，`metrics.filenameFallbacks` 记录是否发生过降级。截图与编码成功不会再因为页面标题不可用而整任务丢失。
+- Robust 对 `failed + insufficient-quality` 不再一概视为强矛盾。Matcher 额外统计所有 informative tiles（即使未通过 strict quality gate）的最佳 offset 共识；只有当 ≥60% 指向同一 offset、score ≥0.72 且最佳/次佳 score 差 ≥0.08 时，最终 recovery 才允许 `continuity=probable / fallbackMethod=probable-score`。
+- `width-mismatch / insufficient-overlap / Strict / unrelated frame` 仍不能使用该路径。Diagnostics 新增 `scoreCandidateOffset / scoreAgreeingTiles / scoreAgreementRatio / scoreBestScore / scoreSecondBestScore / probableScoreCorrections`。
+
+### Phase 2.1 correction — Region coordinates are authoritative after freeze
+
+真实验收发现继续用 anchor translation 驱动 crop 会把用户选择的 `x=200…1200` 跟随到例如 `x=20…1020`。这不是期望的 Region 语义。
+
+因此 `REGION_FREEZE` 之后：
+
+- `frozenRegion.x/y/width/height` 是唯一 authoritative crop；
+- anchors 只记录 `anchorTranslations / lastAnchorDelta / shapeChanges / anchorFallbacks`；
+- anchor 平移、形状变化或临时失效都不再修改 runtime crop；
+- Region 的承诺是“用户确认的 Target-local 视觉矩形”，不是持续追踪内容对象。
+
+### Robust probable-score retry timing
+
+真实 trace 在 retry 0/1 连续给出同一 `528px` offset：`scoreAgreement=0.8`、`scoreBest=0.987`、best-second≈0.123，已经满足现有 strong probable-score 门槛；retry 2 扩大 overlap 后反而使 margin 降到≈0.073。
+
+因此不降低 `probableScoreMargin=0.08`。Robust 改为：
+
+- retry 0：verified match only；
+- retry 1：只允许 strong `probable-score`；
+- retry 2：允许原有 ambiguous/low-information geometry/probable fallback，以及 strong probable-score；
+- Strict 三次都不允许 probable fallback。
+
+### Phase 2.2 correction — freeze the actual UI edges, not post-PREPARE anchors
+
+Region 左偏的根因进一步确认：虽然 `REGION_FREEZE` 之后 crop 已冻结，但旧流程仍会在 PREPARE 后先 `MEASURE → resolveRegion(anchors)`，因此 freeze 之前就可能把用户看到的 200–1200 改成其它坐标。
+
+现在：
+
+- 选择 UI 不再在滚动/更新时持续用 anchors 重写四个数字；
+- 第二角选择后只有在共同 CaptureTarget **发生改变**时，才一次性把两个角转换到新的 target coordinate system；
+- 点击“开始截图”时 UI 中最终显示的 `left/top/right/bottom` 就是 authoritative Scope；
+- PREPARE 后 background 直接 `regionFromEdges(s.edges, s.viewport)`，不再通过 anchors 重建 region；
+- anchors 在正式 capture 中只保留诊断用途。
+
+### Robust final geometry-score
+
+最终 retry 的 `insufficient-quality` 只有在低质量 raw-score 仍满足：
+
+- `scoreAgreementRatio >= 0.5`；
+- 多数候选 offset 与浏览器 observed expectedOffset 相差 ≤1 CSS px；
+- `scoreBestScore >= 0.75`；
+
+才允许 `fallbackMethod=geometry-score`。这覆盖真实的 `272→272 / 0.75 / 0.965` trace，而 unrelated frame 的低 agreement/低 score 仍失败。Strict 不使用该路径。
+
+### Phase 2.3 — Region uses hybrid coordinates and vertical-only scrolling
+
+真实页面稳定出现约 180px 左偏，和自动选中的内部 CaptureTarget 左边缘高度吻合。旧模型把鼠标 `clientX=200` 转成容器局部 `x=20`，导致用户视觉选择和内部横向坐标语义混在一起。
+
+Region 现在采用：
+
+- **横向：浏览器 viewport CSS 坐标**，例如屏幕看到的 200–1200 就永远裁 bitmap 的 200–1200；
+- **纵向：CaptureTarget 内容坐标**，用于跨屏长区域的垂直滚动；
+- Region 只纵向滚动，保持 window/element 当前 horizontal scroll 不变；
+- 内部 region 的输出 x 归一化为 0，`cropLeft` 单独记录 bitmap 源裁剪起点；
+- `drawGeometry()` 在 Region 有 `cropLeft` 时直接用它作为 bitmap 横向源起点；
+- diagnostics `regionViewport` 记录 left/right/width、targetViewportLeft 和 targetKind。
+
+因此内部容器即使位于 viewport `left=180`，用户选 `200–1200` 时输出仍从 bitmap x=200 开始，而不是把 20 当成浏览器横坐标。
+
+
+## Phase 3：Balanced Auto + automatic Multi-part output
+
+Phase 3 将“清晰度选择”和“单个 canvas 的安全上限”彻底分开：
+
+- Auto 默认约 **90% CSS**，不是最高分辨率档；设计目标是日常查看文字足够清晰，同时避免 Device/Retina 级别的空间开销。
+- CSS 100% 是更清晰的手动选择；75% / 50% 用于更小文件；Device 是明确的高分辨率模式。
+- 不再为了生成单图把 1000px 宽压到 688/819px。超过单 part 安全高度时保持所选比例并自动输出 `-01-of-02.png`、`-02-of-02.png` 等连续文件。
+- 每个 part 继续遵守约 16MP / 16384px 的已验证安全 envelope；总输出可超过该限制。
+- frame 跨 part 边界时在输出像素空间拆分 draw，不重截、不丢行、不重复行。
+- Full Page adaptive growth 只更新 total height / partCount；不会在中途改变 scale。
+- 面板列出全部真实 `DownloadItem.filename`。Finder 按钮暂定位第一张；多 part 通常位于用户在连续保存对话框中选择的同一目录。
+
+## Phase 4 — Robust subject-core / volatile-edge tolerance
+
+真实页面验证表明：同一 Full Page 在左侧边栏展开时可能于中后段视觉连续性失败，关闭边栏后成功。Phase 4 不添加站点 selector，也不识别 GitHub DOM；它只重新定义 Robust 的视觉证据优先级。
+
+- 仍先运行原有 full-width matcher；达到 ≥60% 全宽共识时行为完全不变。
+- 只有 full-width 共识不足时，Robust 的**中心 50%（tiles 3–8 / 12）**作为 subject core 做第二层判断。
+- subject core 若有至少 3 个 informative/agreeing tiles 且局部共识 ≥2/3，可用高质量 vote 的 offset；若 strict quality 不足，则 raw-score 必须 ≥2/3 同意 observed expectedOffset（±1px）且 score ≥0.75。
+- subject-core 成功记录 `continuity=probable / matchMode=subject-core / fallbackMethod=subject-core`，不会冒充 full-width verified。
+- 左右各 25% 只在 subject-core 已成立后允许标记为 `volatileEdges`；中心自己不稳定时不会被边缘策略掩盖。
+- Strict 完全不使用 subject-core，仍要求原 full-width + left/center/right zone 规则。
+- diagnostics trace 新增 `zoneEvidence.left/center/right`、`subjectCore`、`volatileEdges`；汇总新增 `subjectCorePlacements / leftEdgeVolatileFrames / rightEdgeVolatileFrames`。
+
+新增确定性 `edge-heavy` fixture：左侧 300px + 右侧 150px 在滚动后变化，中央 450px 主体保持稳定。Robust 必须完成并逐行验证中央像素；Strict 对同页必须失败且无 PNG。
+
+## Phase 4.1 — Terminal Geometry Tolerance
+
+真实失败诊断显示一轮 Full Page 已提交到 27440 / 27460，只剩约 20px；normal matcher 在最后 tail 因低信息失败，而 terminal fallback 的旧条件仍要求高度/滚动底边精确相等（0.01px），无法容忍 element scrollTop 的 0.5px 与 1px extent jitter。
+
+Phase 4.1 只修改 terminal authorization：
+
+- `TERMINAL_GEOMETRY_EPSILON = 1 CSS px`；普通帧、subject-core、Strict 和 Region 不使用该 tolerance。
+- `assessBottomTail()` 保持当前 `s.full.end` 为 authoritative final extent；observed height / visible bottom 与它相差 ≤1px 只视为测量 jitter，不自动扩大或缩小输出。
+- terminal quiescence 的 height / y / physical-bottom 比较使用同一 1px tolerance；>1px 的真实增长仍走 adaptive extension 并撤销本次 anchor。
+- fresh bitmap 前后也使用同一 terminal tolerance；正常 capture 的位置保护不放宽。
+- offscreen anchored tail 的最终 `end` 明确 clamp 到 authoritative `finalExtent`，避免 fractional `scrollTop` 留下 0.5px 尾差。
+- 新 diagnostics：`bottomTailRejectReasons` 与最多 30 条 `bottomTailRejectTrace`，区分 `extent-mismatch / not-physical-bottom / tail-too-large / no-novel-tail / quiescence-* / fresh-capture-unstable / offscreen-*` 等原因。
+
+这条路径仍要求 remaining tail >0 且 ≤ min(320, overlap)、四次 quiescence、visible images ready、fresh capture；Strict 仍不使用 terminal anchor。

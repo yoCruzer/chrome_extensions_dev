@@ -11,9 +11,10 @@
     progress.status = status;
     host.style.setProperty("visibility", "visible", "important");
     shadow.querySelector("p").textContent = status.message;
-    const result = status.result;
-    shadow.querySelector("pre").textContent = result
-      ? `${result.filename.split(/[\\/]/).pop()}\n${result.filename}\n${result.width} × ${result.height} 像素${result.bytes >= 0 ? ` · ${(result.bytes / 1048576).toFixed(2)} MB` : ""}` : "";
+    const result = status.result, results = status.results || (result ? [result] : []);
+    shadow.querySelector("pre").textContent = results.length
+      ? results.map(item => `${item.filename.split(/[\\/]/).pop()}\n${item.filename}\n${item.width} × ${item.height} 像素${item.bytes >= 0 ? ` · ${(item.bytes / 1048576).toFixed(2)} MB` : ""}`).join("\n\n")
+      : "";
     shadow.querySelector("#cancel").hidden = !status.busy;
     shadow.querySelector("#close").hidden = !!status.busy;
     shadow.querySelector("#diagnostics").hidden = !!status.busy;
@@ -206,7 +207,9 @@
       ? "已截图内容发生变化，需要重新截图。" : messages[status.state] || "截图处理中。",
       reasonCode: /^[A-Z_]{1,64}$/.test(status.reasonCode || "") ? status.reasonCode : null,
       attempt: status.attempt || 1, metrics: numeric(status.metrics),
-      diagnostics: { ...numeric(diagnostics), fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
+      diagnostics: { ...numeric(diagnostics), warmup: numeric(diagnostics.warmup),
+        region: numeric(diagnostics.regionDiagnostics), regionViewport: diagnostics.regionViewport || null,
+        fullProof: diagnostics.fullProof || null, visual: diagnostics.visual || null }
     }, null, 2);
   }
 
@@ -335,11 +338,37 @@
     proofTrace(s, "frame-committed");
   }
 
+  function regionForCapture(s) {
+    if (!s.frozenRegion) return resolveRegion(s);
+    if (s.anchors?.first && s.anchors?.second) {
+      try {
+        const resolved = resolveRegion(s);
+        const dx = resolved.x - s.frozenRegion.x, dy = resolved.y - s.frozenRegion.y;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          s.regionDiagnostics.anchorTranslations++;
+          s.regionDiagnostics.lastAnchorDelta = { dx, dy };
+        }
+        if (Math.abs(resolved.width - s.frozenRegion.width) > 0.5 ||
+            Math.abs(resolved.height - s.frozenRegion.height) > 0.5) s.regionDiagnostics.shapeChanges++;
+        s.regionDiagnostics.anchorResolutions++;
+      } catch (error) {
+        if (!["ANCHOR_UNRESOLVABLE", "REGION_INVALID"].includes(error.reasonCode)) throw error;
+        s.regionDiagnostics.anchorFallbacks++;
+        s.regionDiagnostics.lastAnchorReason = error.reasonCode;
+      }
+    }
+    // After REGION_FREEZE the user's Target-local visual rectangle is authoritative.
+    // Anchors are diagnostics only; they must not translate the crop.
+    s.runtimeRegion = { ...s.frozenRegion };
+    return s.runtimeRegion;
+  }
+
   function regionView(s) {
     fullProof(s);
-    const view = targetView(s), region = resolveRegion(s);
+    const view = targetView(s), region = regionForCapture(s);
     if (!region) return view;
-    return { ...view, region, anchors: s.anchorDiagnostics };
+    return { ...view, region, cropLeft: s.frozenCropLeft, anchors: s.anchorDiagnostics,
+      regionDiagnostics: { ...s.regionDiagnostics } };
   }
 
   function requireSession(id) {
@@ -474,9 +503,9 @@
     const move = () => {
       const s = requireSession(id);
       const view = targetView(s);
-      const r = relative ? resolveRegion(s) : null;
+      const r = relative ? regionForCapture(s) : null;
       const element = s.target?.element;
-      (element || window).scrollTo({ left: x + (r?.x || 0) - (element ? view.x - element.scrollLeft : 0),
+      (element || window).scrollTo({ left: element ? element.scrollLeft : scrollX,
         top: y + (r?.y || 0) - (element ? view.y - element.scrollTop : 0), behavior: "instant" });
     };
     move();
@@ -521,31 +550,24 @@
       *{box-sizing:border-box} #panel{pointer-events:auto;position:absolute;right:16px;top:16px;width:300px;padding:16px;background:#182231;color:white;border-radius:12px;box-shadow:0 5px 25px #0006;font:14px/1.5 system-ui}
       h2{font-size:16px;margin:0 0 8px} p{margin:8px 0} .fields{display:grid;grid-template-columns:1fr 1fr;gap:8px} label{display:block} input{width:100%;padding:6px;border:1px solid #8796ab;border-radius:4px} button{padding:7px;margin:5px 3px 0 0;cursor:pointer} #hint{font-size:12px;color:#d5e6ff} #outline{position:fixed;border:2px solid #2687ff;background:#2687ff15;pointer-events:none} #picker{position:absolute;inset:0;pointer-events:auto;cursor:crosshair} [hidden]{display:none!important}
       </style><div id="outline"></div><div id="picker" hidden></div><section id="panel">
-      <h2>选择长截图区域</h2><p>先点选左上角，滚动页面后再点选右下角；也可直接修改边界。</p>
-      <div class="fields"><label>左<input id="left" type="number" min="0" value="0"></label><label>右<input id="right" type="number" min="1" value="${page.clientWidth}"></label><label>上<input id="top" type="number" min="0" value="0"></label><label>下<input id="bottom" type="number" min="1" value="${page.height}"></label></div>
+      <h2>选择长截图区域</h2><p>先点选左上角，滚动页面后再点选右下角；开始截图后将按这里显示的四条边界固定裁剪。</p>
+      <div class="fields"><label>左（视口）<input id="left" type="number" min="0" value="0"></label><label>右（视口）<input id="right" type="number" min="1" value="${page.clientWidth}"></label><label>上（内容）<input id="top" type="number" min="0" value="0"></label><label>下（内容）<input id="bottom" type="number" min="1" value="${page.height}"></label></div>
       <button id="first">点选左上角</button><button id="second">点选右下角</button><button id="capture">开始截图</button><button id="cancel">取消</button><p id="hint">点选跟随内容；修改数字使用固定坐标。Esc 可取消。</p></section>`;
     s.host = host;
     document.documentElement.append(host);
     const $ = id => shadow.getElementById(id);
     const values = () => Object.fromEntries(["left", "right", "top", "bottom"].map(key => [key, Number($(key).value)]));
     const update = () => {
-      let v = values();
-      if (s.anchors?.first && s.anchors?.second) {
-        try {
-          s.edges = v;
-          const r = resolveRegion(s);
-          v = { left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height };
-          for (const key of Object.keys(v)) $(key).value = v[key];
-        } catch { /* Start reports invalid anchors. */ }
-      }
+      const v = values();
+      s.edges = v;
       const view = targetView(s);
-      $("outline").style.cssText = `left:${v.left - view.x + view.viewportRect.left}px;top:${v.top - view.y + view.viewportRect.top}px;width:${Math.max(0, v.right - v.left)}px;height:${Math.max(0, v.bottom - v.top)}px`;
+      $("outline").style.cssText = `left:${v.left}px;top:${v.top - view.y + view.viewportRect.top}px;width:${Math.max(0, v.right - v.left)}px;height:${Math.max(0, v.bottom - v.top)}px`;
       for (const key of ["left", "right", "top", "bottom"]) $(key).disabled = !!s.target;
-      if (s.target) $("hint").textContent = "已选择内部滚动容器；边界显示容器内坐标，请用点选调整。";
+      if (s.target) $("hint").textContent = "已选择内部滚动容器：左右为浏览器视口坐标，上下为容器内容坐标。";
     };
     document.addEventListener("scroll", update, { passive: true, capture: true });
     s.removeSelectionListener = () => document.removeEventListener("scroll", update, true);
-    shadow.addEventListener("input", () => { s.anchors = null; s.target = null; update(); });
+    shadow.addEventListener("input", () => { s.anchors = null; s.target = null; s.edges = values(); update(); });
     for (const [button, keys] of [["first", ["left", "top"]], ["second", ["right", "bottom"]]]) {
       $(button).onclick = () => {
         $("picker").hidden = false;
@@ -553,13 +575,24 @@
         $("picker").onclick = event => {
           event.preventDefault(); event.stopPropagation();
           try {
+            const oldTarget = s.target?.element;
             s.anchors ||= {};
             s.anchors[button] = anchorAt(s, event.clientX, event.clientY);
             detectTarget(s);
+            if (button === "second" && s.anchors.first && oldTarget !== s.target?.element) {
+              // CaptureTarget may change once both corners are known. Recompute
+              // vertical content coordinates only; horizontal selection stays
+              // in browser viewport coordinates.
+              const r = resolveRegion(s);
+              $("top").value = r.y;
+              $("bottom").value = r.y + r.height;
+              $("right").value = event.clientX;
+            } else {
+              const point = targetPoint(s, event.clientX, event.clientY);
+              $(keys[0]).value = event.clientX;
+              $(keys[1]).value = point.y;
+            }
           } catch (error) { $("hint").textContent = error.message; return; }
-          const point = targetPoint(s, event.clientX, event.clientY);
-          $(keys[0]).value = point.x;
-          $(keys[1]).value = point.y;
           $("picker").hidden = true;
           update();
         };
@@ -613,6 +646,15 @@
         return targetView(s);
       }
       if (m.type === "FULL_COMMIT") { commitFullProof(s, m.rect); return {}; }
+      if (m.type === "REGION_FREEZE") {
+        if (!m.region || ![m.region.x, m.region.y, m.region.width, m.region.height].every(Number.isFinite) ||
+            m.region.width <= 0 || m.region.height <= 0) throw Object.assign(new Error("选区冻结失败。"), { reasonCode: "REGION_INVALID" });
+        s.frozenRegion = { ...m.region };
+        s.runtimeRegion = { ...m.region };
+        s.frozenCropLeft = m.cropLeft;
+        s.regionDiagnostics = { anchorResolutions: 0, anchorFallbacks: 0, anchorTranslations: 0, shapeChanges: 0 };
+        return { region: s.runtimeRegion, cropLeft: s.frozenCropLeft };
+      }
       if (m.type === "MEASURE" && m.watch) fullProof(s, true);
       if (m.type === "SCROLL") return settle(m.id, m.x, m.y, m.relative);
       if (m.type === "BOTTOM") {

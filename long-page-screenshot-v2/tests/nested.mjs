@@ -1,17 +1,18 @@
+import { clickPickerButton } from './picker.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 export async function testNested({page, worker, message, capture, waitFor, PNG, browserCDP}) {
   const position = () => page.evaluate(()=>[scrollY,document.getElementById('conversation').scrollTop]);
   const select = async cross => {
-    const job=await capture('region');
-    await page.mouse.click(642,245);await page.mouse.click(80,40);
+    const job=await capture('region','css');
+    await clickPickerButton(page,'first');await page.mouse.click(80,40);
     if(cross) await page.evaluate(()=>document.getElementById('conversation').scrollTop=4180);
-    await page.mouse.click(730,245);await page.mouse.click(579,cross?659:439);
+    await clickPickerButton(page,'second');await page.mouse.click(579,cross?659:439);
     assert.deepEqual(await position(),[0,cross?4180:0]);
     return job;
   };
-  const start = () => page.mouse.click(811,245);
+  const start = () => clickPickerButton(page,'capture');
   for(const mode of ["same","cross","resize"]) {
     const cross=mode!=="same";
     await page.reload();await select(cross);await start();
