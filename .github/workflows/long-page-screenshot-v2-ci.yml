@@ -6,13 +6,13 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - "long-page-screenshot-v2/**"
-      - ".github/workflows/long-page-screenshot-v2-ci.yml"
+      - 'long-page-screenshot-v2/**'
+      - '.github/workflows/long-page-screenshot-v2-ci.yml'
   push:
     branches: [main]
     paths:
-      - "long-page-screenshot-v2/**"
-      - ".github/workflows/long-page-screenshot-v2-ci.yml"
+      - 'long-page-screenshot-v2/**'
+      - '.github/workflows/long-page-screenshot-v2-ci.yml'
 
 permissions:
   contents: read
@@ -24,54 +24,109 @@ concurrency:
 jobs:
   node:
     name: Node unit tests
-    if: github.event_name == 'pull_request' && github.event.action != 'ready_for_review'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: "24.21.0"
+          node-version: '24.21.0'
       - name: Run Node tests
         run: node --test long-page-screenshot-v2/tests/*.test.mjs
-
-  full-regression:
-    name: Full Chrome regression
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      CI: "true"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24.21.0"
-
-      - name: Prepare regression log directory
+      - name: Prepare offline fixture replay bundle
+        if: github.event_name != 'pull_request' || !github.event.pull_request.draft
         shell: bash
         run: |
-          echo "REGRESSION_LOG_DIR=$RUNNER_TEMP/long-page-screenshot-v2-final" >> "$GITHUB_ENV"
+          set -euo pipefail
+          REPLAY="$RUNNER_TEMP/v2-ci-replay"
+          mkdir -p "$REPLAY/source"
+          git archive HEAD long-page-screenshot-v2 .github/workflows | tar -x -C "$REPLAY/source"
+          git rev-parse HEAD > "$REPLAY/TESTED_COMMIT.txt"
+          npm install --ignore-scripts --prefix "$REPLAY/deps" playwright@1.63.0 pngjs@7.0.0
+          tar -czf "$RUNNER_TEMP/v2-ci-replay.tgz" -C "$REPLAY" .
+      - name: Upload offline fixture replay bundle
+        if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+        uses: actions/upload-artifact@v5
+        with:
+          name: v2-ci-replay-${{ github.run_id }}
+          path: ${{ runner.temp }}/v2-ci-replay.tgz
+          retention-days: 7
 
+  browser:
+    name: Chrome / ${{ matrix.group }}
+    needs: node
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        group:
+          - chrome-policy
+          - chrome-visual
+          - chrome-bottom-tail
+          - chrome-base
+          - chrome-output
+          - chrome-adaptive
+          - chrome-proof
+          - chrome-full-nested
+          - chrome-diagnostics
+          - chrome-dynamic-region
+          - chrome-nested-region
+          - chrome-csdn-like
+          - chrome-chat-like
+          - chrome-complex
+          - chrome-retina-2x
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+      - name: Prepare regression logs
+        run: echo "REGRESSION_LOG_DIR=$RUNNER_TEMP/v2-${{ matrix.group }}" >> "$GITHUB_ENV"
       - name: Install isolated test dependencies
         shell: bash
         run: |
           set -euo pipefail
           DEPS_DIR="$RUNNER_TEMP/long-page-screenshot-test-deps"
-          npm install --prefix "$DEPS_DIR" playwright@1.63.0 pngjs@7.0.0
+          npm install --ignore-scripts --prefix "$DEPS_DIR" playwright@1.63.0 pngjs@7.0.0
           echo "NODE_PATH=$DEPS_DIR/node_modules" >> "$GITHUB_ENV"
-          "$DEPS_DIR/node_modules/.bin/playwright" install --with-deps chromium
+          "$DEPS_DIR/node_modules/.bin/playwright" install --with-deps --no-shell chromium
           export NODE_PATH="$DEPS_DIR/node_modules"
-          echo "CHROME_EXECUTABLE=$(node -e "const { chromium } = require('playwright'); process.stdout.write(chromium.executablePath())")" >> "$GITHUB_ENV"
-
-      - name: Run final regression
-        run: bash long-page-screenshot-v2/tests/final-regression.sh
-
-      - name: Upload regression logs
+          echo "CHROME_EXECUTABLE=$(node -e "process.stdout.write(require('playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: Run regression group
+        run: bash long-page-screenshot-v2/tests/final-regression.sh '${{ matrix.group }}'
+      - name: Upload regression evidence
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: long-page-screenshot-v2-regression-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/long-page-screenshot-v2-final/
+          name: v2-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/v2-${{ matrix.group }}/
+            /tmp/screenshot-v2-test-*/*.png
+            /tmp/screenshot-v2-test-*/*.json
+            /tmp/screenshot-v2-test-*/downloads/*.png
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
+
+  full-gate:
+    name: Full regression gate
+    needs: [node, browser]
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    env:
+      NODE_RESULT: ${{ needs.node.result }}
+      BROWSER_RESULT: ${{ needs.browser.result }}
+    steps:
+      - name: Require Node and every Chrome group
+        run: |
+          echo "Node: $NODE_RESULT; Chrome matrix: $BROWSER_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          test "$NODE_RESULT" = success && test "$BROWSER_RESULT" = success

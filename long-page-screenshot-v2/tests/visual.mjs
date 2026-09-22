@@ -1,25 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { installVisualMutation } from './visual-hooks.mjs';
 export async function testVisual({page,worker,capture,waitFor,PNG}) {
  for(const kind of ['static','github','github-recovery','github-recovery-small','sidebar','ad','islands','edge-heavy','global','transient','unrelated','ambiguous','low']) {
   const githubRecovery = kind === 'github-recovery' || kind === 'github-recovery-small';
   await page.setViewportSize({width:900,height:kind==='github-recovery'?912:kind==='github-recovery-small'?768:700});
   await page.goto(new URL('?kind='+(githubRecovery?'github':kind),page.url()).href);
   const ref=PNG.sync.read(Buffer.from(await page.evaluate(()=>reference),'base64'));
-  if(kind==='transient'||githubRecovery)await worker.evaluate(last=>{
-   const original=chrome.tabs.captureVisibleTab.bind(chrome.tabs);let calls=0;
-   chrome.tabs.captureVisibleTab=async(...args)=>{
-    calls++;
-    if(calls===2||calls===last){
-     const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
-     await chrome.scripting.executeScript({target:{tabId:tab.id},world:'MAIN',func:async seed=>{paint(seed);await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))},args:[calls===2?987654:0]});
-    }
-    if(calls===last)chrome.tabs.captureVisibleTab=original;
-    return original(...args);
-   };
-  },githubRecovery?4:3);
+  await installVisualMutation(worker,{restoreAt:githubRecovery?4:kind==='transient'?3:0});
   await capture('full','css');
   const result=await waitFor(s=>!s.busy),v=result.diagnostics.visual;
+  assert.equal(await page.evaluate(()=>visualMutationStatus().changed),true,'mutation hook must execute after warm-up');
   assert.equal(v.bottomTailAccepted,0,`${kind} must remain visual-only`);
   if(kind==='unrelated') {
    assert.equal(result.state,'failed',JSON.stringify(result));assert.equal(result.reasonCode,'VISUAL_CONTINUITY_FAILED');
@@ -52,12 +43,11 @@ export async function testVisual({page,worker,capture,waitFor,PNG}) {
   }
   assert.deepEqual(await worker.evaluate(()=>chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})),[]);
   assert.equal(await page.evaluate(()=>scrollY),0);
-  console.log('PASS visual',kind,JSON.stringify(v));
+  console.log('PASS visual',kind,JSON.stringify({checks:v.visualChecks,retries:v.visualRecoveryRetries,subjectCore:v.subjectCorePlacements}));
  }
-
- // The same heavy-edge fixture must remain fail-closed in Strict.
  await page.setViewportSize({width:900,height:700});
  await page.goto(new URL('?kind=edge-heavy',page.url()).href);
+ await installVisualMutation(worker);
  await capture('full','css','strict');
  const strictEdge=await waitFor(s=>!s.busy);
  assert.equal(strictEdge.state,'failed',JSON.stringify(strictEdge));
