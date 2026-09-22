@@ -1,3 +1,4 @@
+import { clickPickerButton } from './picker.mjs';
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -56,13 +57,13 @@ export async function testComplexPage({ page, worker, message, waitFor, capture,
   await capture('region','css');
   await page.screenshot({ path: join(root, 'complex-selection.png') });
   // Use the actual closed-shadow selection UI across a long scroll.
-  await page.mouse.click(642, 245);
+  await clickPickerButton(page,'first');
   await page.mouse.click(edges.left, edges.top);
   await page.evaluate(y => scrollTo({ top: y, behavior: 'instant' }), edges.bottom - 550);
-  await page.mouse.click(730, 245);
+  await clickPickerButton(page,'second');
   const bottomPoint = await page.evaluate(bottom => bottom - scrollY, edges.bottom);
   await page.mouse.click(edges.right, bottomPoint);
-  await page.mouse.click(811, 245);
+  await clickPickerButton(page,'capture');
   const region = await waitFor(s => !s.busy);
   assert.equal(region.state, 'complete', JSON.stringify(region));
   const regionFiles = await filesFor(regionSince);

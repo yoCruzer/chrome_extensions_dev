@@ -22,9 +22,11 @@ function paint(height){
  window.reference=c.toDataURL().split(',')[1];
 }
 paint(extent);window.positions=[];
+let captureArmed=false;
+window.armTailMutation=()=>{captureArmed=true};
 (nested?target:window).addEventListener('scroll',()=>{
  const y=nested?target.scrollTop:scrollY;positions.push({windowY:scrollY,targetY:y});
- if(kind==='44'&&extent===6364&&y>=4500)paint(6428);
+ if(captureArmed&&kind==='44'&&extent===6364&&y>=4500)paint(6428);
  if(kind==='not-bottom'&&y>5472)scrollTo(0,5472);
 });
 if(nested)target.scrollTop=317;

@@ -1,3 +1,4 @@
+import { clickPickerButton } from './picker.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -7,14 +8,14 @@ export async function testDynamicRegion({ page, worker, waitFor, capture, PNG })
   const select = async (container = false) => {
     if (container) await page.evaluate(() => document.getElementById('target-article').style.paddingBottom = '20px');
     await capture('region','css');
-    await page.mouse.click(642, 245);
+    await clickPickerButton(page,'first');
     await page.mouse.click(80, 40);
     await page.evaluate(() => scrollTo(0, 1940));
-    await page.mouse.click(730, 245);
+    await clickPickerButton(page,'second');
     // Last pixel is deliberately inside the bottom DOM anchor.
     await page.mouse.click(579, container ? 509 : 499);
   };
-  const start = () => page.mouse.click(811, 245);
+  const start = () => clickPickerButton(page,'capture');
   const verify = async (result, container = false, grown = false, frozen = false) => {
     assert.equal(result.state, 'complete', JSON.stringify(result));
     assert.equal(result.parts, 1);

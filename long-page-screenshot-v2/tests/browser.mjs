@@ -63,12 +63,27 @@ try {
   const message = value => control.evaluate(value => chrome.runtime.sendMessage({ target: "background", ...value }), value);
   const waitFor = async predicate => {
     const start = Date.now();
+    let state;
+    const fail = async reason => {
+      const report = { reason, expected: String(predicate), elapsedMs: Date.now() - start, state };
+      await writeFile(join(root, 'capture-wait-failure.json'), JSON.stringify(report, null, 2));
+      await page.screenshot({path: join(root, 'capture-wait-failure.png')}).catch(() => {});
+      throw new Error(`${reason}: ${JSON.stringify(report)}`);
+    };
     while (Date.now() - start < 180_000) {
-      const state = await message({ type: "STATUS" });
-      if (predicate(state)) return state;
+      state = await message({ type: "STATUS" });
+      if (predicate(state)) {
+        if (!state.busy && ['complete', 'failed', 'cancelled'].includes(state.state)) {
+          await writeFile(join(root, 'capture-terminal-state.json'), JSON.stringify(state, null, 2));
+        }
+        return state;
+      }
+      if (!state.busy && ['complete', 'failed', 'cancelled'].includes(state.state)) {
+        await fail('Capture ended before the expected checkpoint');
+      }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    throw new Error("Timed out waiting for capture state");
+    await fail('Timed out waiting for capture state');
   };
   const capture = async (mode, output = "auto", continuityPolicy) => {
     await page.bringToFront();

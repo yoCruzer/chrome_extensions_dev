@@ -7,11 +7,13 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'long-page-screenshot-v2/**'
+      - 'tests/fixtures/test-complex-page.html'
       - '.github/workflows/long-page-screenshot-v2-ci.yml'
   push:
     branches: [main]
     paths:
       - 'long-page-screenshot-v2/**'
+      - 'tests/fixtures/test-complex-page.html'
       - '.github/workflows/long-page-screenshot-v2-ci.yml'
 
 permissions:
@@ -42,7 +44,7 @@ jobs:
           set -euo pipefail
           REPLAY="$RUNNER_TEMP/v2-ci-replay"
           mkdir -p "$REPLAY/source"
-          git archive HEAD long-page-screenshot-v2 .github/workflows | tar -x -C "$REPLAY/source"
+          git archive HEAD long-page-screenshot-v2 tests/fixtures/test-complex-page.html .github/workflows | tar -x -C "$REPLAY/source"
           git rev-parse HEAD > "$REPLAY/TESTED_COMMIT.txt"
           npm install --ignore-scripts --prefix "$REPLAY/deps" playwright@1.63.0 pngjs@7.0.0
           tar -czf "$RUNNER_TEMP/v2-ci-replay.tgz" -C "$REPLAY" .
