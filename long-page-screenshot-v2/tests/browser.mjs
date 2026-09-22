@@ -291,7 +291,10 @@ try {
     await chrome.tabs.setZoom(tab.id, 1.25);
   });
   const zoomJob = await capture("region", "device");
-  await selectRegion(zoomJob, { left: 200, top: 100, right: 840, bottom: 2260 });
+  const zoomViewportWidth = await page.evaluate(() => innerWidth);
+  assert.ok(zoomViewportWidth >= 640, `zoomed viewport too narrow: ${zoomViewportWidth}`);
+  const zoomLeft = Math.floor((zoomViewportWidth - 640) / 2);
+  await selectRegion(zoomJob, { left: zoomLeft, top: 100, right: zoomLeft + 640, bottom: 2260 });
   const zoomResult = await waitFor(s => !s.busy);
   assert.equal(zoomResult.state, "complete", JSON.stringify(zoomResult));
   const [zoomFile] = await worker.evaluate(() => chrome.downloads.search({ orderBy: ["-startTime"], limit: 1 }));
